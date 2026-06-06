@@ -340,6 +340,35 @@
     .section-anim-2 { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.28s both; }
     .section-anim-3 { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.36s both; }
 
+    /* Subscribe */
+    .subscribe-wrap {
+      margin-top: 20px;
+      display: flex;
+      align-items: center;
+      min-height: 28px;
+      animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.48s both;
+    }
+    #sub-form {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+    }
+    .sub-input {
+      flex: 1;
+      background: var(--ctrl-bg);
+      border: 1px solid var(--accent-dim);
+      border-radius: 3px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 5px 9px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .sub-input:focus { border-color: var(--accent); }
+    .sub-input::placeholder { color: var(--muted); }
+
     @media (max-width: 480px) {
       body { padding: 36px 20px 60px; }
       .controls { top: 14px; right: 16px; }
@@ -377,6 +406,27 @@
   <div class="refresh-row">
     <span class="last-checked" id="last-checked">–</span>
     <button class="act-btn" id="btn-refresh" onclick="runChecks()">↻ verificar agora</button>
+  </div>
+
+  <div class="subscribe-wrap" id="subscribe-wrap">
+    <div id="sub-idle">
+      <button class="act-btn" onclick="showSubscribe()">+ receber alertas por email</button>
+    </div>
+    <div id="sub-form" style="display:none">
+      <input type="email" id="sub-email" class="sub-input" placeholder="seu@email.com"
+             onkeydown="if(event.key==='Enter')doSubscribe()" />
+      <button class="act-btn ok" onclick="doSubscribe()" id="sub-ok-btn">ok</button>
+      <button class="act-btn" onclick="hideSubscribe()">×</button>
+    </div>
+    <div id="sub-done" style="display:none">
+      <span class="micro">alertas ativados ✓</span>
+    </div>
+    <div id="sub-already" style="display:none">
+      <span class="micro">email já inscrito ✓</span>
+    </div>
+    <div id="sub-error" style="display:none">
+      <span class="micro" style="color:var(--down)">erro — tente novamente</span>
+    </div>
   </div>
 
   <footer>
@@ -602,6 +652,51 @@
     html.setAttribute('data-theme', next);
     try { localStorage.setItem('theme', next); } catch(e) {}
     document.getElementById('btn-theme').textContent = next === 'dark' ? 'light' : 'dark';
+  }
+
+  function showSubscribe() {
+    document.getElementById('sub-idle').style.display = 'none';
+    const form = document.getElementById('sub-form');
+    form.style.display = 'flex';
+    document.getElementById('sub-email').focus();
+  }
+
+  function hideSubscribe() {
+    document.getElementById('sub-form').style.display = 'none';
+    document.getElementById('sub-idle').style.display = '';
+    document.getElementById('sub-email').value = '';
+  }
+
+  async function doSubscribe() {
+    const input = document.getElementById('sub-email');
+    const email = input.value.trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      input.focus();
+      return;
+    }
+    const btn = document.getElementById('sub-ok-btn');
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      const res = await fetch('/api/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      document.getElementById('sub-form').style.display = 'none';
+      if (data.already) {
+        document.getElementById('sub-already').style.display = '';
+      } else if (data.ok) {
+        document.getElementById('sub-done').style.display = '';
+      } else {
+        document.getElementById('sub-error').style.display = '';
+      }
+    } catch {
+      btn.disabled = false;
+      btn.textContent = 'ok';
+      document.getElementById('sub-error').style.display = '';
+    }
   }
 
   // Init theme button label
