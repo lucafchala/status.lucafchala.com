@@ -425,7 +425,7 @@
       <span class="micro">email já inscrito ✓</span>
     </div>
     <div id="sub-error" style="display:none">
-      <span class="micro" style="color:var(--down)">erro — tente novamente</span>
+      <span class="micro" style="color:var(--down)" id="sub-error-msg">erro — tente novamente</span>
     </div>
   </div>
 
@@ -693,6 +693,12 @@
     document.getElementById('sub-email').value = '';
   }
 
+  function showSubError(msg) {
+    const el = document.getElementById('sub-error-msg');
+    if (el) el.textContent = msg || 'erro — tente novamente';
+    document.getElementById('sub-error').style.display = '';
+  }
+
   async function doSubscribe() {
     const input = document.getElementById('sub-email');
     const email = input.value.trim();
@@ -703,6 +709,7 @@
     const btn = document.getElementById('sub-ok-btn');
     btn.disabled = true;
     btn.textContent = '…';
+    document.getElementById('sub-error').style.display = 'none';
     try {
       const res = await fetch('/api/subscribe', {
         method: 'POST',
@@ -716,12 +723,11 @@
       } else if (data.ok) {
         document.getElementById('sub-done').style.display = '';
       } else {
-        document.getElementById('sub-error').style.display = '';
+        showSubError(data.error);
       }
-    } catch {
-      btn.disabled = false;
-      btn.textContent = 'ok';
-      document.getElementById('sub-error').style.display = '';
+    } catch (e) {
+      document.getElementById('sub-form').style.display = 'none';
+      showSubError('Falha de rede — tente novamente');
     }
   }
 

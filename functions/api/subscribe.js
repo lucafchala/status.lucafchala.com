@@ -1,17 +1,35 @@
-// All subscribers stored in one KV key as a JSON array.
-// Cost: 1 read + 1 write per subscribe/unsubscribe (vs 2-3 ops with per-key storage).
-
 export async function onRequestPost({ request, env }) {
-  const KV = env.STATUS_KV;
-  if (!KV) return json({ error: 'not configured' }, 500);
+  const { RESEND_API_KEY, NOTIFY_TO, NOTIFY_FROM = 'status@lucafchala.com', STATUS_KV: KV } = env;
 
   let email;
   try { ({ email } = await request.json()); } catch {
-    return json({ error: 'invalid body' }, 400);
+    return json({ error: 'JSON inválido' }, 400);
   }
   email = (email || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return json({ error: 'invalid email' }, 400);
+    return json({ error: 'Email inválido' }, 400);
+  }
+
+  if (!RESEND_API_KEY) {
+    return json({ error: 'Serviço de email não configurado (RESEND_API_KEY ausente)' }, 500);
+  }
+
+  // If KV is not bound, still accept the subscription — notify admin via email
+  // so no subscriber is silently lost during setup.
+  if (!KV) {
+    if (NOTIFY_TO) {
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: NOTIFY_FROM,
+          to: [NOTIFY_TO],
+          subject: `Nova inscrição pendente — ${email}`,
+          html: `<p style="font-family:monospace">${email} quer receber alertas mas STATUS_KV não está configurado. Adicione o binding no Cloudflare Pages.</p>`,
+        }),
+      }).catch(() => {});
+    }
+    return json({ error: 'Armazenamento não configurado (STATUS_KV ausente)' }, 500);
   }
 
   // 1 read
@@ -28,20 +46,22 @@ export async function onRequestPost({ request, env }) {
   // 1 write
   await KV.put('subscribers', JSON.stringify(subs));
 
-  // Welcome email (1 Resend call)
-  const { RESEND_API_KEY, NOTIFY_FROM = 'status@lucafchala.com' } = env;
-  if (RESEND_API_KEY) {
-    const unsubUrl = `https://status.lucafchala.com/api/unsubscribe?token=${token}`;
-    await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: NOTIFY_FROM,
-        to: [email],
-        subject: 'Inscrição confirmada — status.lucafchala.com',
-        html: welcomeHtml(unsubUrl),
-      }),
-    }).catch(() => {});
+  // Welcome email
+  const unsubUrl = `https://status.lucafchala.com/api/unsubscribe?token=${token}`;
+  const emailRes = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: NOTIFY_FROM,
+      to: [email],
+      subject: 'Inscrição confirmada — status.lucafchala.com',
+      html: welcomeHtml(unsubUrl),
+    }),
+  });
+
+  if (!emailRes.ok) {
+    const detail = await emailRes.text().catch(() => '');
+    return json({ error: `Inscrição salva, mas email falhou: ${emailRes.status}${detail ? ' — ' + detail : ''}` }, 502);
   }
 
   return json({ ok: true });
