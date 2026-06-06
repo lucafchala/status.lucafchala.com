@@ -17,10 +17,11 @@ async function checkOne(svc) {
   const start = Date.now();
   try {
     const res = await fetch(svc.url, {
-      method: 'HEAD',
+      method: 'GET',
       redirect: 'follow',
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
+    res.body?.cancel(); // discard body — we only need the status code
     const rt = Date.now() - start;
     let status;
     if      (res.status >= 500) status = 'down';
