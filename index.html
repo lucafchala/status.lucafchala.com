@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Status — lucafchala.com</title>
+  <meta name="theme-color" content="#0d0c0a" />
+  <meta name="description" content="Status dos serviços do ecossistema lucafchala.com" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
+  <script>
+    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch(e) {}
+  </script>
+  <style>
+    :root {
+      --bg: #0d0c0a;
+      --border: #252220;
+      --text: #e6e1d6;
+      --muted: #6a6358;
+      --accent: #c08030;
+      --accent-dim: #6a4818;
+      --ctrl-bg: #161412;
+      --up: #4a8c5c;
+      --up-dim: #2a5c38;
+      --down: #8c3a3a;
+      --down-dim: #5c1a1a;
+      --degraded: #8c6a20;
+      --degraded-dim: #5c4010;
+    }
+    [data-theme="light"] {
+      --bg: #f4efe6;
+      --border: #d8d1c4;
+      --text: #1c1a17;
+      --muted: #9a8f80;
+      --accent: #a06820;
+      --accent-dim: #c89050;
+      --ctrl-bg: #ede8df;
+      --up: #2a6e40;
+      --up-dim: #a8d8b4;
+      --down: #8c2020;
+      --down-dim: #f0b4b4;
+      --degraded: #7a5010;
+      --degraded-dim: #f0d8a0;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { font-size: 14px; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 400;
+      min-height: 100vh;
+      padding: 48px 32px 72px;
+      position: relative;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.28;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+      background-size: 200px 200px;
+      z-index: 0;
+    }
+
+    .wrap {
+      max-width: 680px;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Controls */
+    .controls {
+      position: fixed;
+      top: 20px;
+      right: 24px;
+      z-index: 10;
+    }
+    .controls-inner {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--ctrl-bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 4px 6px;
+    }
+    .ctrl-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 400;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      cursor: pointer;
+      padding: 3px 6px;
+      border-radius: 2px;
+      transition: color 0.15s;
+    }
+    .ctrl-btn:hover { color: var(--accent); }
+    .ctrl-sep { color: var(--border); font-size: 10px; user-select: none; }
+
+    /* Header */
+    header {
+      margin-bottom: 40px;
+      animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0s both;
+    }
+    h1.name {
+      font-family: 'Cormorant Garamond', serif;
+      font-weight: 300;
+      font-size: clamp(40px, 8vw, 64px);
+      line-height: 0.92;
+      letter-spacing: -0.01em;
+      margin-bottom: 10px;
+    }
+    h1.name em {
+      font-style: italic;
+      color: var(--accent);
+    }
+    .micro {
+      font-size: 10px;
+      font-weight: 400;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    /* Overall banner */
+    .banner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--ctrl-bg);
+      margin-bottom: 32px;
+      animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.12s both;
+    }
+    .banner-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted);
+    }
+    .banner-dot.all-up { background: var(--up); box-shadow: 0 0 6px var(--up); }
+    .banner-dot.some-down { background: var(--degraded); box-shadow: 0 0 6px var(--degraded); }
+    .banner-dot.all-down { background: var(--down); box-shadow: 0 0 6px var(--down); }
+    .banner-text {
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+    }
+    .banner-sub {
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      margin-left: auto;
+    }
+
+    /* Rule */
+    .rule {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 9px;
+      font-weight: 400;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 28px 0 16px;
+    }
+    .rule::before, .rule::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* Service grid */
+    .services {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .service {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--ctrl-bg);
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.15s, background 0.15s, transform 0.15s;
+      cursor: default;
+    }
+    .service:hover {
+      border-color: var(--accent-dim);
+      background: var(--border);
+      transform: translateY(-1px);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted);
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .status-dot.checking {
+      background: var(--muted);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    .status-dot.up {
+      background: var(--up);
+      box-shadow: 0 0 5px var(--up);
+    }
+    .status-dot.down {
+      background: var(--down);
+      box-shadow: 0 0 5px var(--down);
+    }
+    .status-dot.degraded {
+      background: var(--degraded);
+      box-shadow: 0 0 5px var(--degraded);
+    }
+
+    .service-info { flex: 1; min-width: 0; }
+    .service-name {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 16px;
+      font-weight: 600;
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .service-url {
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      display: block;
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .service-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .service-status-label {
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .service-status-label.up { color: var(--up); }
+    .service-status-label.down { color: var(--down); }
+    .service-status-label.degraded { color: var(--degraded); }
+    .service-rt {
+      font-size: 9px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
+
+    /* Refresh button */
+    .refresh-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 24px;
+      animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.44s both;
+    }
+    .last-checked {
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+    }
+    .act-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 400;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      cursor: pointer;
+      padding: 5px 10px;
+      border-radius: 3px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .act-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+    .act-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* Footer */
+    footer {
+      margin-top: 48px;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-align: center;
+      animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.52s both;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* Animations */
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+
+    .section-anim { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.20s both; }
+    .section-anim-2 { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.28s both; }
+    .section-anim-3 { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.36s both; }
+
+    @media (max-width: 480px) {
+      body { padding: 36px 20px 60px; }
+      .controls { top: 14px; right: 16px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="controls">
+  <div class="controls-inner">
+    <button class="ctrl-btn" id="btn-theme" onclick="toggleTheme()">light</button>
+    <span class="ctrl-sep">·</span>
+    <a href="https://lucafchala.com" class="ctrl-btn" style="text-decoration:none">home</a>
+  </div>
+</div>
+
+<div class="wrap">
+  <header>
+    <h1 class="name">Status<br /><em>lucafchala.com</em></h1>
+    <p class="micro">monitoramento de serviços</p>
+  </header>
+
+  <div class="banner" id="banner">
+    <div class="status-dot checking" id="banner-dot"></div>
+    <span class="banner-text" id="banner-text">Verificando serviços…</span>
+    <span class="banner-sub" id="banner-sub"></span>
+  </div>
+
+  <div class="rule section-anim">serviços</div>
+  <div class="services section-anim" id="services-list"></div>
+
+  <div class="refresh-row">
+    <span class="last-checked" id="last-checked">–</span>
+    <button class="act-btn" id="btn-refresh" onclick="runChecks()">↻ verificar agora</button>
+  </div>
+
+  <footer>
+    <a href="https://dash.lucafchala.com">dash</a>
+    &nbsp;·&nbsp;
+    <a href="https://lucafchala.com">lucafchala.com</a>
+  </footer>
+</div>
+
+<script>
+  const SERVICES = [
+    { name: 'lucafchala.com',      url: 'https://lucafchala.com',                group: 'principal' },
+    { name: 'Rádio',               url: 'https://radio.lucafchala.com',           group: 'principal' },
+    { name: 'Fotos',               url: 'https://fotos.lucafchala.com',           group: 'apps' },
+    { name: 'Fotos — Dashboard',   url: 'https://fotos.lucafchala.com/dashboard', group: 'apps' },
+    { name: 'Dash',                url: 'https://dash.lucafchala.com',            group: 'apps' },
+    { name: 'Now',                 url: 'https://now.lucafchala.com',             group: 'apps' },
+    { name: 'Paste',               url: 'https://paste.lucafchala.com',           group: 'apps' },
+    { name: 'Weblog',              url: 'https://weblog.lucafchala.com',          group: 'apps' },
+    { name: 'URL',                 url: 'https://url.lucafchala.com',             group: 'apps' },
+    { name: 'Admin',               url: 'https://omg.lucafchala.com',             group: 'interno' },
+  ];
+
+  const TIMEOUT_MS = 10000;
+  const DEGRADED_MS = 2500;
+  const REFRESH_INTERVAL_MS = 60000;
+
+  let refreshTimer = null;
+  let checking = false;
+
+  async function checkService(svc) {
+    const start = performance.now();
+    try {
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+      await fetch(svc.url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+      clearTimeout(tid);
+      const rt = Math.round(performance.now() - start);
+      return { ...svc, status: rt > DEGRADED_MS ? 'degraded' : 'up', rt };
+    } catch (e) {
+      const rt = Math.round(performance.now() - start);
+      if (e.name === 'AbortError') return { ...svc, status: 'down', rt: TIMEOUT_MS };
+      return { ...svc, status: 'down', rt };
+    }
+  }
+
+  function statusLabel(s) {
+    if (s === 'up') return 'online';
+    if (s === 'degraded') return 'lento';
+    return 'offline';
+  }
+
+  function rtLabel(rt, status) {
+    if (status === 'down') return '–';
+    if (rt >= 1000) return (rt / 1000).toFixed(1) + 's';
+    return rt + 'ms';
+  }
+
+  function renderSkeletons() {
+    const list = document.getElementById('services-list');
+    list.innerHTML = SERVICES.map((svc, i) => `
+      <div class="service" id="svc-${i}" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
+        <div class="status-dot checking" id="dot-${i}"></div>
+        <div class="service-info">
+          <span class="service-name">${svc.name}</span>
+          <span class="service-url">${svc.url.replace('https://', '')}</span>
+        </div>
+        <div class="service-meta">
+          <span class="service-status-label" id="lbl-${i}">—</span>
+          <span class="service-rt" id="rt-${i}"></span>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function updateServiceRow(i, result) {
+    const dot = document.getElementById(`dot-${i}`);
+    const lbl = document.getElementById(`lbl-${i}`);
+    const rt  = document.getElementById(`rt-${i}`);
+    if (!dot) return;
+    dot.className = `status-dot ${result.status}`;
+    lbl.className = `service-status-label ${result.status}`;
+    lbl.textContent = statusLabel(result.status);
+    rt.textContent = rtLabel(result.rt, result.status);
+  }
+
+  function updateBanner(results) {
+    const dot  = document.getElementById('banner-dot');
+    const text = document.getElementById('banner-text');
+    const sub  = document.getElementById('banner-sub');
+    const down = results.filter(r => r.status === 'down').length;
+    const deg  = results.filter(r => r.status === 'degraded').length;
+    const up   = results.filter(r => r.status === 'up').length;
+
+    if (down === 0 && deg === 0) {
+      dot.className = 'status-dot all-up';
+      text.textContent = 'Todos os sistemas operacionais';
+    } else if (down === results.length) {
+      dot.className = 'status-dot all-down';
+      text.textContent = 'Interrupção generalizada';
+    } else {
+      dot.className = 'status-dot some-down';
+      const issues = [];
+      if (down > 0) issues.push(`${down} offline`);
+      if (deg > 0)  issues.push(`${deg} lento${deg > 1 ? 's' : ''}`);
+      text.textContent = `Degradação parcial — ${issues.join(', ')}`;
+    }
+
+    sub.textContent = `${up}/${results.length} ok`;
+  }
+
+  function updateLastChecked() {
+    const el = document.getElementById('last-checked');
+    const now = new Date();
+    el.textContent = `verificado às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  }
+
+  async function runChecks() {
+    if (checking) return;
+    checking = true;
+
+    const btn = document.getElementById('btn-refresh');
+    btn.disabled = true;
+    btn.textContent = '↻ verificando…';
+
+    document.getElementById('banner-dot').className = 'status-dot checking';
+    document.getElementById('banner-text').textContent = 'Verificando serviços…';
+    document.getElementById('banner-sub').textContent = '';
+
+    // Reset dots to checking
+    SERVICES.forEach((_, i) => {
+      const dot = document.getElementById(`dot-${i}`);
+      if (dot) dot.className = 'status-dot checking';
+    });
+
+    // Check all in parallel, update each as it resolves
+    const results = await Promise.all(
+      SERVICES.map((svc, i) =>
+        checkService(svc).then(r => { updateServiceRow(i, r); return r; })
+      )
+    );
+
+    updateBanner(results);
+    updateLastChecked();
+
+    btn.disabled = false;
+    btn.textContent = '↻ verificar agora';
+    checking = false;
+
+    // Schedule next auto-refresh
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(runChecks, REFRESH_INTERVAL_MS);
+  }
+
+  function toggleTheme() {
+    const html = document.documentElement;
+    const current = html.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', next);
+    try { localStorage.setItem('theme', next); } catch(e) {}
+    document.getElementById('btn-theme').textContent = next === 'dark' ? 'light' : 'dark';
+  }
+
+  // Init theme button label
+  try {
+    const t = localStorage.getItem('theme') || 'dark';
+    document.getElementById('btn-theme').textContent = t === 'dark' ? 'light' : 'dark';
+  } catch(e) {}
+
+  // Render and kick off checks
+  renderSkeletons();
+  runChecks();
+</script>
+</body>
+</html>
