@@ -1,10 +1,11 @@
-// GitHub, Cloudflare, Anthropic, Resend → Atlassian Statuspage JSON API
-// Google → Google Cloud Status JSON (different format, no Atlassian)
+// GitHub, Cloudflare, Anthropic → confirmed Atlassian Statuspage JSON API
+// Resend → try Atlassian API first; fall back to connectivity check if not available
+// Google → Google Cloud Status JSON (different format)
 const SERVICES = [
   { name: 'GitHub',       api: 'https://www.githubstatus.com/api/v2/status.json',     page: 'https://www.githubstatus.com' },
   { name: 'Cloudflare',   api: 'https://www.cloudflarestatus.com/api/v2/status.json', page: 'https://www.cloudflarestatus.com' },
   { name: 'Claude',       api: 'https://status.anthropic.com/api/v2/status.json',     page: 'https://status.anthropic.com' },
-  { name: 'Resend',       api: 'https://status.resend.com/api/v2/status.json',        page: 'https://status.resend.com' },
+  { name: 'Resend',       api: 'https://status.resend.com/api/v2/status.json', fallbackUrl: 'https://resend.com', page: 'https://status.resend.com' },
   { name: 'Google Drive', googleCloud: true, product: 'Google Drive',                 page: 'https://workspace.google.com/status' },
   { name: 'Google Fonts', googleCloud: true, product: 'Google Fonts',                 page: 'https://status.cloud.google.com' },
 ];
@@ -50,6 +51,16 @@ function googleCloudStatus(incidents, product) {
   };
 }
 
+async function connectivityCheck(url, name, page) {
+  try {
+    const res = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(8000) });
+    const status = res.status >= 500 ? 'down' : 'up';
+    return { name, page, status, description: '' };
+  } catch {
+    return { name, page, status: 'down', description: '' };
+  }
+}
+
 async function checkOne(svc) {
   if (svc.googleCloud) {
     try {
@@ -65,11 +76,22 @@ async function checkOne(svc) {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(8000),
     });
+    // If API doesn't exist or returns non-JSON, fall back to connectivity
+    if (res.status === 404 || res.status === 403) {
+      if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
+      return { name: svc.name, page: svc.page, status: 'up', description: '' };
+    }
     if (!res.ok) return { name: svc.name, page: svc.page, status: 'degraded', description: `HTTP ${res.status}` };
-    const json = await res.json();
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch {
+      if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
+      return { name: svc.name, page: svc.page, status: 'up', description: '' };
+    }
     const { status, description } = atlassianStatus(json);
     return { name: svc.name, page: svc.page, status, description };
   } catch {
+    if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
     return { name: svc.name, page: svc.page, status: 'down', description: '' };
   }
 }

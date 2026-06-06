@@ -22,7 +22,10 @@ async function checkOne(svc) {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const rt = Date.now() - start;
-    // treat any HTTP response (including 4xx) as reachable
+    // 5xx = server error → down; 4xx = server up but auth/not-found → still up
+    if (res.status >= 500) {
+      return { name: svc.name, url: svc.url, status: 'down', statusCode: res.status, rt };
+    }
     const status = rt > DEGRADED_MS ? 'degraded' : 'up';
     return { name: svc.name, url: svc.url, status, statusCode: res.status, rt };
   } catch (e) {
