@@ -533,6 +533,12 @@
     return rt + 'ms';
   }
 
+  function codeLabel(code) {
+    if (!code) return '';
+    if (code >= 200 && code < 400) return '';   // normal — don't clutter
+    return 'HTTP ' + code;
+  }
+
   function renderThirdPartySkeletons() {
     const list = document.getElementById('third-party-list');
     list.innerHTML = THIRD_PARTY.map((svc, i) => `
@@ -573,20 +579,23 @@
         <div class="service-meta">
           <span class="service-status-label" id="lbl-${i}">—</span>
           <span class="service-rt" id="rt-${i}"></span>
+          <span class="service-rt" id="code-${i}" style="opacity:0.6"></span>
         </div>
       </div>
     `).join('');
   }
 
   function updateServiceRow(i, result) {
-    const dot = document.getElementById(`dot-${i}`);
-    const lbl = document.getElementById(`lbl-${i}`);
-    const rt  = document.getElementById(`rt-${i}`);
+    const dot  = document.getElementById(`dot-${i}`);
+    const lbl  = document.getElementById(`lbl-${i}`);
+    const rt   = document.getElementById(`rt-${i}`);
+    const code = document.getElementById(`code-${i}`);
     if (!dot) return;
     dot.className = `status-dot ${result.status}`;
     lbl.className = `service-status-label ${result.status}`;
     lbl.textContent = statusLabel(result.status);
     rt.textContent = rtLabel(result.rt, result.status);
+    if (code) code.textContent = codeLabel(result.statusCode);
   }
 
   function updateBanner(results) {
