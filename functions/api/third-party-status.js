@@ -1,10 +1,12 @@
+// Atlassian Statuspage JSON API — used by GitHub, Cloudflare, Anthropic
+// Resend and Google don't expose a reliable machine-readable API; use connectivity checks instead
 const SERVICES = [
   { name: 'GitHub',       api: 'https://www.githubstatus.com/api/v2/status.json',     page: 'https://www.githubstatus.com' },
   { name: 'Cloudflare',   api: 'https://www.cloudflarestatus.com/api/v2/status.json', page: 'https://www.cloudflarestatus.com' },
   { name: 'Claude',       api: 'https://status.anthropic.com/api/v2/status.json',     page: 'https://status.anthropic.com' },
-  { name: 'Resend',       api: 'https://status.resend.com/api/v2/status.json',        page: 'https://status.resend.com' },
-  { name: 'Google Drive', api: 'https://www.googlecloudstatus.com/api/v2/status.json', page: 'https://workspace.google.com/status' },
-  { name: 'Google Fonts', api: null, url: 'https://fonts.googleapis.com',             page: 'https://status.cloud.google.com' },
+  { name: 'Resend',       url: 'https://api.resend.com',                              page: 'https://resend.com/status' },
+  { name: 'Google Drive', url: 'https://drive.google.com',                            page: 'https://workspace.google.com/status' },
+  { name: 'Google Fonts', url: 'https://fonts.googleapis.com',                        page: 'https://status.cloud.google.com' },
 ];
 
 function indicatorToStatus(indicator) {
@@ -17,6 +19,7 @@ async function checkOne(svc) {
   if (svc.api) {
     try {
       const res = await fetch(svc.api, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) return { name: svc.name, page: svc.page, status: 'down', description: '' };
       const json = await res.json();
       return {
         name: svc.name,
@@ -29,7 +32,8 @@ async function checkOne(svc) {
     }
   } else {
     try {
-      await fetch(svc.url, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(svc.url, { signal: AbortSignal.timeout(8000) });
+      // Any HTTP response (even 4xx/redirects) means the server is reachable
       return { name: svc.name, page: svc.page, status: 'up', description: '' };
     } catch {
       return { name: svc.name, page: svc.page, status: 'down', description: '' };

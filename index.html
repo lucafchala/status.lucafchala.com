@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Status — lucafchala.com</title>
   <meta name="theme-color" content="#0d0c0a" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <meta name="description" content="Status dos serviços do ecossistema lucafchala.com" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -484,7 +485,6 @@
         </div>
         <div class="service-meta">
           <span class="service-status-label" id="tp-lbl-${i}">—</span>
-          <span class="service-rt" id="tp-rt-${i}"></span>
         </div>
       </a>
     `).join('');
@@ -493,14 +493,12 @@
   function updateThirdPartyRow(i, result) {
     const dot  = document.getElementById(`tp-dot-${i}`);
     const lbl  = document.getElementById(`tp-lbl-${i}`);
-    const rt   = document.getElementById(`tp-rt-${i}`);
     const desc = document.getElementById(`tp-desc-${i}`);
     if (!dot) return;
     dot.className = `status-dot ${result.status}`;
     lbl.className = `service-status-label ${result.status}`;
     lbl.textContent = statusLabel(result.status);
     if (result.description) desc.textContent = result.description;
-    rt.textContent = result.statusApi ? '' : rtLabel(result.rt, result.status);
   }
 
   function renderSkeletons() {
