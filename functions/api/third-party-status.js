@@ -1,9 +1,10 @@
-// GitHub, Cloudflare, Anthropic → confirmed Atlassian Statuspage JSON API
-// Resend → try Atlassian API first; fall back to connectivity check if not available
+// GitHub, Anthropic → Atlassian Statuspage JSON API
+// Cloudflare → Atlassian components API filtered to Brazil (GRU/São Paulo) PoPs
+// Resend → try Atlassian API first; fall back to connectivity check
 // Google → Google Cloud Status JSON (different format)
 const SERVICES = [
   { name: 'GitHub',       api: 'https://www.githubstatus.com/api/v2/status.json',     page: 'https://www.githubstatus.com' },
-  { name: 'Cloudflare',   api: 'https://www.cloudflarestatus.com/api/v2/status.json', page: 'https://www.cloudflarestatus.com' },
+  { name: 'Cloudflare',   cloudflare: true,                                            page: 'https://www.cloudflarestatus.com' },
   { name: 'Claude',       api: 'https://status.anthropic.com/api/v2/status.json',     page: 'https://status.anthropic.com' },
   { name: 'Resend',       api: 'https://status.resend.com/api/v2/status.json', fallbackUrl: 'https://resend.com', page: 'https://status.resend.com' },
   { name: 'Google Drive', googleCloud: true, product: 'Google Drive',                 page: 'https://workspace.google.com/status' },
@@ -11,6 +12,13 @@ const SERVICES = [
 ];
 
 const GOOGLE_STATUS_URL = 'https://status.cloud.google.com/incidents.json';
+
+// Atlassian component status → our status
+function componentStatus(status) {
+  if (!status || status === 'operational') return 'up';
+  if (status === 'degraded_performance' || status === 'partial_outage' || status === 'under_maintenance') return 'degraded';
+  return 'down'; // major_outage
+}
 
 function atlassianStatus(json) {
   const ind = json?.status?.indicator;
@@ -20,11 +28,49 @@ function atlassianStatus(json) {
   return { status: 'down', description };
 }
 
+// Filter Cloudflare components to Brazil PoPs (GRU = São Paulo)
+async function checkCloudflare(page) {
+  const res = await fetch('https://www.cloudflarestatus.com/api/v2/components.json', {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  const components = json?.components || [];
+
+  // Match Brazil data centers: name contains "Brazil", "GRU", or "São Paulo"
+  const brazil = components.filter(c => {
+    const n = (c.name || '').toLowerCase();
+    return n.includes('brazil') || n.includes('gru') || n.includes('são paulo') || n.includes('sao paulo');
+  });
+
+  if (brazil.length === 0) {
+    // No Brazil-specific components found; fall back to overall status
+    const overall = json?.page?.status_indicator || 'none';
+    return { status: componentStatus(overall), description: 'Brazil PoP data unavailable' };
+  }
+
+  // Worst status among matched Brazil components
+  const statuses = brazil.map(c => c.status);
+  let worst = 'up';
+  for (const s of statuses) {
+    const mapped = componentStatus(s);
+    if (mapped === 'down') { worst = 'down'; break; }
+    if (mapped === 'degraded') worst = 'degraded';
+  }
+
+  const affected = brazil.filter(c => c.status !== 'operational');
+  const description = affected.length === 0
+    ? 'All Brazil PoPs Operational'
+    : affected.map(c => c.name).join(', ');
+
+  return { status: worst, description };
+}
+
 let googleCache = null;
 let googleCacheAt = 0;
 
 async function fetchGoogleCloud() {
-  // cache within the same request batch (invocation-scoped)
   if (googleCache && Date.now() - googleCacheAt < 5000) return googleCache;
   const res = await fetch(GOOGLE_STATUS_URL, {
     headers: { Accept: 'application/json' },
@@ -38,7 +84,6 @@ async function fetchGoogleCloud() {
 
 function googleCloudStatus(incidents, product) {
   if (!Array.isArray(incidents)) return { status: 'up', description: 'All Systems Operational' };
-  // incidents.json lists currently active incidents; filter by affected product
   const active = incidents.filter(inc => {
     const affected = (inc.affected_products || []).map(p => (p.title || p.id || '').toLowerCase());
     return affected.some(p => p.includes(product.toLowerCase().split(' ')[1]));
@@ -54,14 +99,21 @@ function googleCloudStatus(incidents, product) {
 async function connectivityCheck(url, name, page) {
   try {
     const res = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(8000) });
-    const status = res.status >= 500 ? 'down' : 'up';
-    return { name, page, status, description: '' };
+    return { name, page, status: res.status >= 500 ? 'down' : 'up', description: '' };
   } catch {
     return { name, page, status: 'down', description: '' };
   }
 }
 
 async function checkOne(svc) {
+  if (svc.cloudflare) {
+    try {
+      const { status, description } = await checkCloudflare(svc.page);
+      return { name: svc.name, page: svc.page, status, description };
+    } catch {
+      return { name: svc.name, page: svc.page, status: 'down', description: '' };
+    }
+  }
   if (svc.googleCloud) {
     try {
       const incidents = await fetchGoogleCloud();
@@ -76,7 +128,6 @@ async function checkOne(svc) {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(8000),
     });
-    // If API doesn't exist or returns non-JSON, fall back to connectivity
     if (res.status === 404 || res.status === 403) {
       if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
       return { name: svc.name, page: svc.page, status: 'up', description: '' };
