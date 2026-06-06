@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Status — lucafchala.com</title>
   <meta name="theme-color" content="#0d0c0a" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <meta name="description" content="Status dos serviços do ecossistema lucafchala.com" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -339,6 +340,35 @@
     .section-anim-2 { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.28s both; }
     .section-anim-3 { animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.36s both; }
 
+    /* Subscribe */
+    .subscribe-wrap {
+      margin-top: 20px;
+      display: flex;
+      align-items: center;
+      min-height: 28px;
+      animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.48s both;
+    }
+    #sub-form {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+    }
+    .sub-input {
+      flex: 1;
+      background: var(--ctrl-bg);
+      border: 1px solid var(--accent-dim);
+      border-radius: 3px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 5px 9px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .sub-input:focus { border-color: var(--accent); }
+    .sub-input::placeholder { color: var(--muted); }
+
     @media (max-width: 480px) {
       body { padding: 36px 20px 60px; }
       .controls { top: 14px; right: 16px; }
@@ -378,6 +408,27 @@
     <button class="act-btn" id="btn-refresh" onclick="runChecks()">↻ verificar agora</button>
   </div>
 
+  <div class="subscribe-wrap" id="subscribe-wrap">
+    <div id="sub-idle">
+      <button class="act-btn" onclick="showSubscribe()">+ receber alertas por email</button>
+    </div>
+    <div id="sub-form" style="display:none">
+      <input type="email" id="sub-email" class="sub-input" placeholder="seu@email.com"
+             onkeydown="if(event.key==='Enter')doSubscribe()" />
+      <button class="act-btn ok" onclick="doSubscribe()" id="sub-ok-btn">ok</button>
+      <button class="act-btn" onclick="hideSubscribe()">×</button>
+    </div>
+    <div id="sub-done" style="display:none">
+      <span class="micro">alertas ativados ✓</span>
+    </div>
+    <div id="sub-already" style="display:none">
+      <span class="micro">email já inscrito ✓</span>
+    </div>
+    <div id="sub-error" style="display:none">
+      <span class="micro" style="color:var(--down)">erro — tente novamente</span>
+    </div>
+  </div>
+
   <footer>
     <a href="https://lucafchala.com">lucafchala.com</a>
     &nbsp;·&nbsp;
@@ -408,29 +459,45 @@
     { name: 'Google Fonts', page: 'https://status.cloud.google.com' },
   ];
 
-  const TIMEOUT_MS = 10000;
-  const DEGRADED_MS = 2500;
   const REFRESH_INTERVAL_MS = 60000;
-  const NOTIFY_COOLDOWN_MS = 3600000; // 1 hour per service
+  const NOTIFY_COOLDOWN_MS  = 60 * 60 * 1000; // 1 hour per service
 
   let refreshTimer = null;
   let checking = false;
 
-  function shouldNotify(failedServices) {
+  // Detect status changes vs last known state (localStorage), fire /api/notify-all once per change.
+  // Zero server calls during stable operation — only fires when something actually changes.
+  function detectChanges(results) {
     const now = Date.now();
-    let store = {};
-    try { store = JSON.parse(localStorage.getItem('notify_sent') || '{}'); } catch(e) {}
-    const toNotify = failedServices.filter(svc => {
-      const last = store[svc.url] || 0;
-      return now - last > NOTIFY_COOLDOWN_MS;
-    });
-    if (toNotify.length === 0) return;
-    toNotify.forEach(svc => { store[svc.url] = now; });
-    try { localStorage.setItem('notify_sent', JSON.stringify(store)); } catch(e) {}
-    fetch('/api/notify', {
+    let prev   = {};
+    let sent   = {};
+    try { prev = JSON.parse(localStorage.getItem('last_status') || '{}'); } catch(e) {}
+    try { sent = JSON.parse(localStorage.getItem('notify_sent') || '{}'); } catch(e) {}
+
+    const changes = [];
+    for (const svc of results) {
+      const p = prev[svc.name];
+      if (p && p !== svc.status) {
+        const lastSent = sent[svc.name] || 0;
+        if (now - lastSent >= NOTIFY_COOLDOWN_MS) {
+          changes.push({ name: svc.name, url: svc.url, from: p, to: svc.status });
+          sent[svc.name] = now;
+        }
+      }
+    }
+
+    // Always update last known state
+    const newState = {};
+    for (const svc of results) newState[svc.name] = svc.status;
+    try { localStorage.setItem('last_status', JSON.stringify(newState)); } catch(e) {}
+
+    if (changes.length === 0) return;
+    try { localStorage.setItem('notify_sent', JSON.stringify(sent)); } catch(e) {}
+
+    fetch('/api/notify-all', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ failed: toNotify.map(s => ({ name: s.name, url: s.url, status: s.status })) }),
+      body: JSON.stringify({ changes }),
     }).catch(() => {});
   }
 
@@ -444,19 +511,13 @@
     }
   }
 
-  async function checkService(svc) {
-    const start = performance.now();
+  async function fetchStatus() {
     try {
-      const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-      await fetch(svc.url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
-      clearTimeout(tid);
-      const rt = Math.round(performance.now() - start);
-      return { ...svc, status: rt > DEGRADED_MS ? 'degraded' : 'up', rt };
-    } catch (e) {
-      const rt = Math.round(performance.now() - start);
-      if (e.name === 'AbortError') return { ...svc, status: 'down', rt: TIMEOUT_MS };
-      return { ...svc, status: 'down', rt };
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      const json = await res.json();
+      return json.services;
+    } catch {
+      return SERVICES.map(s => ({ ...s, status: 'down', rt: 0 }));
     }
   }
 
@@ -484,7 +545,6 @@
         </div>
         <div class="service-meta">
           <span class="service-status-label" id="tp-lbl-${i}">—</span>
-          <span class="service-rt" id="tp-rt-${i}"></span>
         </div>
       </a>
     `).join('');
@@ -493,14 +553,12 @@
   function updateThirdPartyRow(i, result) {
     const dot  = document.getElementById(`tp-dot-${i}`);
     const lbl  = document.getElementById(`tp-lbl-${i}`);
-    const rt   = document.getElementById(`tp-rt-${i}`);
     const desc = document.getElementById(`tp-desc-${i}`);
     if (!dot) return;
     dot.className = `status-dot ${result.status}`;
     lbl.className = `service-status-label ${result.status}`;
     lbl.textContent = statusLabel(result.status);
     if (result.description) desc.textContent = result.description;
-    rt.textContent = result.statusApi ? '' : rtLabel(result.rt, result.status);
   }
 
   function renderSkeletons() {
@@ -584,19 +642,16 @@
       if (dot) dot.className = 'status-dot checking';
     });
 
-    // Check all in parallel, update each as it resolves
-    const [results] = await Promise.all([
-      Promise.all(SERVICES.map((svc, i) =>
-        checkService(svc).then(r => { updateServiceRow(i, r); return r; })
-      )),
+    // Check all in parallel server-side — avoids browser DNS cache / CORS issues
+    const [[results]] = await Promise.all([
+      fetchStatus().then(svcs => { svcs.forEach((r, i) => updateServiceRow(i, r)); return [svcs]; }),
       fetchThirdPartyStatus().then(svcs => svcs.forEach((r, i) => updateThirdPartyRow(i, r))),
     ]);
 
     updateBanner(results);
     updateLastChecked();
 
-    const failed = results.filter(r => r.status === 'down' || r.status === 'degraded');
-    if (failed.length > 0) shouldNotify(failed);
+    detectChanges(results);
 
     btn.disabled = false;
     btn.textContent = '↻ verificar agora';
@@ -614,6 +669,51 @@
     html.setAttribute('data-theme', next);
     try { localStorage.setItem('theme', next); } catch(e) {}
     document.getElementById('btn-theme').textContent = next === 'dark' ? 'light' : 'dark';
+  }
+
+  function showSubscribe() {
+    document.getElementById('sub-idle').style.display = 'none';
+    const form = document.getElementById('sub-form');
+    form.style.display = 'flex';
+    document.getElementById('sub-email').focus();
+  }
+
+  function hideSubscribe() {
+    document.getElementById('sub-form').style.display = 'none';
+    document.getElementById('sub-idle').style.display = '';
+    document.getElementById('sub-email').value = '';
+  }
+
+  async function doSubscribe() {
+    const input = document.getElementById('sub-email');
+    const email = input.value.trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      input.focus();
+      return;
+    }
+    const btn = document.getElementById('sub-ok-btn');
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      const res = await fetch('/api/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      document.getElementById('sub-form').style.display = 'none';
+      if (data.already) {
+        document.getElementById('sub-already').style.display = '';
+      } else if (data.ok) {
+        document.getElementById('sub-done').style.display = '';
+      } else {
+        document.getElementById('sub-error').style.display = '';
+      }
+    } catch {
+      btn.disabled = false;
+      btn.textContent = 'ok';
+      document.getElementById('sub-error').style.display = '';
+    }
   }
 
   // Init theme button label
