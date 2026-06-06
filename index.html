@@ -460,26 +460,44 @@
   ];
 
   const REFRESH_INTERVAL_MS = 60000;
-  const NOTIFY_COOLDOWN_MS = 3600000; // 1 hour per service
+  const NOTIFY_COOLDOWN_MS  = 60 * 60 * 1000; // 1 hour per service
 
   let refreshTimer = null;
   let checking = false;
 
-  function shouldNotify(failedServices) {
+  // Detect status changes vs last known state (localStorage), fire /api/notify-all once per change.
+  // Zero server calls during stable operation — only fires when something actually changes.
+  function detectChanges(results) {
     const now = Date.now();
-    let store = {};
-    try { store = JSON.parse(localStorage.getItem('notify_sent') || '{}'); } catch(e) {}
-    const toNotify = failedServices.filter(svc => {
-      const last = store[svc.url] || 0;
-      return now - last > NOTIFY_COOLDOWN_MS;
-    });
-    if (toNotify.length === 0) return;
-    toNotify.forEach(svc => { store[svc.url] = now; });
-    try { localStorage.setItem('notify_sent', JSON.stringify(store)); } catch(e) {}
-    fetch('/api/notify', {
+    let prev   = {};
+    let sent   = {};
+    try { prev = JSON.parse(localStorage.getItem('last_status') || '{}'); } catch(e) {}
+    try { sent = JSON.parse(localStorage.getItem('notify_sent') || '{}'); } catch(e) {}
+
+    const changes = [];
+    for (const svc of results) {
+      const p = prev[svc.name];
+      if (p && p !== svc.status) {
+        const lastSent = sent[svc.name] || 0;
+        if (now - lastSent >= NOTIFY_COOLDOWN_MS) {
+          changes.push({ name: svc.name, url: svc.url, from: p, to: svc.status });
+          sent[svc.name] = now;
+        }
+      }
+    }
+
+    // Always update last known state
+    const newState = {};
+    for (const svc of results) newState[svc.name] = svc.status;
+    try { localStorage.setItem('last_status', JSON.stringify(newState)); } catch(e) {}
+
+    if (changes.length === 0) return;
+    try { localStorage.setItem('notify_sent', JSON.stringify(sent)); } catch(e) {}
+
+    fetch('/api/notify-all', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ failed: toNotify.map(s => ({ name: s.name, url: s.url, status: s.status })) }),
+      body: JSON.stringify({ changes }),
     }).catch(() => {});
   }
 
@@ -633,8 +651,7 @@
     updateBanner(results);
     updateLastChecked();
 
-    const failed = results.filter(r => r.status === 'down' || r.status === 'degraded');
-    if (failed.length > 0) shouldNotify(failed);
+    detectChanges(results);
 
     btn.disabled = false;
     btn.textContent = '↻ verificar agora';
