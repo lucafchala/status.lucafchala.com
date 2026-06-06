@@ -409,8 +409,6 @@
     { name: 'Google Fonts', page: 'https://status.cloud.google.com' },
   ];
 
-  const TIMEOUT_MS = 10000;
-  const DEGRADED_MS = 2500;
   const REFRESH_INTERVAL_MS = 60000;
   const NOTIFY_COOLDOWN_MS = 3600000; // 1 hour per service
 
@@ -445,19 +443,13 @@
     }
   }
 
-  async function checkService(svc) {
-    const start = performance.now();
+  async function fetchStatus() {
     try {
-      const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-      await fetch(svc.url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
-      clearTimeout(tid);
-      const rt = Math.round(performance.now() - start);
-      return { ...svc, status: rt > DEGRADED_MS ? 'degraded' : 'up', rt };
-    } catch (e) {
-      const rt = Math.round(performance.now() - start);
-      if (e.name === 'AbortError') return { ...svc, status: 'down', rt: TIMEOUT_MS };
-      return { ...svc, status: 'down', rt };
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      const json = await res.json();
+      return json.services;
+    } catch {
+      return SERVICES.map(s => ({ ...s, status: 'down', rt: 0 }));
     }
   }
 
@@ -582,11 +574,9 @@
       if (dot) dot.className = 'status-dot checking';
     });
 
-    // Check all in parallel, update each as it resolves
-    const [results] = await Promise.all([
-      Promise.all(SERVICES.map((svc, i) =>
-        checkService(svc).then(r => { updateServiceRow(i, r); return r; })
-      )),
+    // Check all in parallel server-side — avoids browser DNS cache / CORS issues
+    const [[results]] = await Promise.all([
+      fetchStatus().then(svcs => { svcs.forEach((r, i) => updateServiceRow(i, r)); return [svcs]; }),
       fetchThirdPartyStatus().then(svcs => svcs.forEach((r, i) => updateThirdPartyRow(i, r))),
     ]);
 
