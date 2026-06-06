@@ -379,9 +379,9 @@
   </div>
 
   <footer>
-    <a href="https://dash.lucafchala.com">dash</a>
-    &nbsp;·&nbsp;
     <a href="https://lucafchala.com">lucafchala.com</a>
+    &nbsp;·&nbsp;
+    <a href="mailto:suporte@lucafchala.com">suporte@lucafchala.com</a>
   </footer>
 </div>
 
@@ -398,15 +398,14 @@
     { name: 'URL',                 url: 'https://url.lucafchala.com',             group: 'apps' },
   ];
 
-  // Third-party services — use their Atlassian Statuspage JSON APIs (CORS-enabled)
-  // Google Drive/Fonts don't have a clean status API; fall back to no-cors connectivity
+  // Third-party order must match what the server returns (functions/api/third-party-status.js)
   const THIRD_PARTY = [
-    { name: 'GitHub',        statusApi: 'https://www.githubstatus.com/api/v2/status.json',     page: 'https://www.githubstatus.com' },
-    { name: 'Cloudflare',    statusApi: 'https://www.cloudflarestatus.com/api/v2/status.json', page: 'https://www.cloudflarestatus.com' },
-    { name: 'Claude',        statusApi: 'https://status.anthropic.com/api/v2/status.json',     page: 'https://status.anthropic.com' },
-    { name: 'Resend',        statusApi: 'https://status.resend.com/api/v2/status.json',        page: 'https://status.resend.com' },
-    { name: 'Google Drive',  statusApi: null, url: 'https://drive.google.com',                 page: 'https://workspace.google.com/status' },
-    { name: 'Google Fonts',  statusApi: null, url: 'https://fonts.googleapis.com',             page: 'https://status.cloud.google.com' },
+    { name: 'GitHub',       page: 'https://www.githubstatus.com' },
+    { name: 'Cloudflare',   page: 'https://www.cloudflarestatus.com' },
+    { name: 'Claude',       page: 'https://status.anthropic.com' },
+    { name: 'Resend',       page: 'https://status.resend.com' },
+    { name: 'Google Drive', page: 'https://workspace.google.com/status' },
+    { name: 'Google Fonts', page: 'https://status.cloud.google.com' },
   ];
 
   const TIMEOUT_MS = 10000;
@@ -435,41 +434,13 @@
     }).catch(() => {});
   }
 
-  // Atlassian Statuspage indicator → our status
-  function indicatorToStatus(indicator) {
-    if (!indicator || indicator === 'none') return 'up';
-    if (indicator === 'minor') return 'degraded';
-    return 'down'; // major, critical, maintenance
-  }
-
-  async function checkThirdParty(svc) {
-    const start = performance.now();
-    if (svc.statusApi) {
-      try {
-        const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-        const res = await fetch(svc.statusApi, { cache: 'no-store', signal: ctrl.signal });
-        clearTimeout(tid);
-        const json = await res.json();
-        const indicator = json?.status?.indicator;
-        const description = json?.status?.description || '';
-        const rt = Math.round(performance.now() - start);
-        return { ...svc, status: indicatorToStatus(indicator), description, rt };
-      } catch(e) {
-        return { ...svc, status: 'down', description: '', rt: Math.round(performance.now() - start) };
-      }
-    } else {
-      // no-cors fallback (Google services)
-      try {
-        const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-        await fetch(svc.url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
-        clearTimeout(tid);
-        const rt = Math.round(performance.now() - start);
-        return { ...svc, status: rt > DEGRADED_MS ? 'degraded' : 'up', description: '', rt };
-      } catch(e) {
-        return { ...svc, status: 'down', description: '', rt: Math.round(performance.now() - start) };
-      }
+  async function fetchThirdPartyStatus() {
+    try {
+      const res = await fetch('/api/third-party-status', { cache: 'no-store' });
+      const json = await res.json();
+      return json.services; // [{ name, page, status, description }]
+    } catch {
+      return THIRD_PARTY.map(s => ({ ...s, status: 'down', description: '' }));
     }
   }
 
@@ -618,9 +589,7 @@
       Promise.all(SERVICES.map((svc, i) =>
         checkService(svc).then(r => { updateServiceRow(i, r); return r; })
       )),
-      Promise.all(THIRD_PARTY.map((svc, i) =>
-        checkThirdParty(svc).then(r => { updateThirdPartyRow(i, r); return r; })
-      )),
+      fetchThirdPartyStatus().then(svcs => svcs.forEach((r, i) => updateThirdPartyRow(i, r))),
     ]);
 
     updateBanner(results);
