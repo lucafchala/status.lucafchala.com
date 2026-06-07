@@ -8,6 +8,8 @@ const SERVICES = [
   { name: 'Paste',             url: 'https://paste.lucafchala.com' },
   { name: 'Weblog',            url: 'https://weblog.lucafchala.com' },
   { name: 'URL',               url: 'https://url.lucafchala.com' },
+  { name: 'Keys',              url: 'https://keys.lucafchala.com' },
+  { name: 'Proof',             url: 'https://proof.lucafchala.com' },
 ];
 
 const TIMEOUT_MS  = 10000;
