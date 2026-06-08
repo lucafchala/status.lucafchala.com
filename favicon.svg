@@ -1,5 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="6" fill="#0d0c0a"/>
-  <circle cx="16" cy="16" r="7" fill="#4a8c5c"/>
-  <circle cx="16" cy="16" r="4" fill="#0d0c0a" opacity="0.35"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <style>
+      @media (prefers-color-scheme: light) {
+        rect.bg { fill: #f4efe6; }
+        path { fill: #a06820; }
+        circle { fill: #a06820; }
+      }
+    </style>
+  </defs>
+  <rect class="bg" width="512" height="512" rx="80" fill="#0d0c0a"/>
+  <path d="M 140 120 L 220 120 L 220 300 L 360 300 L 360 380 L 140 380 Z" fill="#c08030"/>
+  <circle cx="380" cy="100" r="25" fill="#c08030"/>
+  <circle cx="440" cy="70" r="25" fill="#c08030"/>
 </svg>
