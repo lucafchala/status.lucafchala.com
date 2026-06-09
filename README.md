@@ -21,30 +21,30 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 ```
             ┌────────────────────────── browser (index.html) ──────────────────────────┐
             │  on load + every 60s:  GET /api/status   GET /api/third-party-status       │
-            │  on state change:      POST /api/notify-all                                │
             │  subscribe form:       POST /api/subscribe       (unsub link → GET /api/unsubscribe)
             └───────────────────────────────────┬───────────────────────────────────────┘
                                                  │  Cloudflare Pages Functions (/functions/api/*)
                           ┌──────────────────────┼─────────────────────────┐
                           ▼                       ▼                         ▼
                   health-check fetches     Resend API (email)         Workers KV (STATUS_KV)
-                  to *.lucafchala.com       api.resend.com            key "subscribers"
-                  & provider status APIs
+                  to *.lucafchala.com       api.resend.com            subscribers, last_status,
+                  & provider status APIs                              notify_sent:{name}
 ```
 
-- **Static front end:** `index.html` (inline HTML/CSS/JS) renders the dashboard, persists `theme` in `localStorage`, compares previous vs. current status to detect transitions, and throttles notifications (≈1 hour per service per change).
-- **Serverless back end:** five Pages Functions under `functions/api/` (routes derive from file paths).
-- **State:** a single KV key, `subscribers`, holding `[{ email, token, subscribedAt }]`.
+- **Static front end:** `index.html` (inline HTML/CSS/JS) renders the dashboard and persists `theme` in `localStorage`.
+- **Serverless back end:** Pages Functions under `functions/api/` (routes derive from file paths). `/api/status` and `/api/third-party-status` are edge-cached for 30 s (`s-maxage`), so concurrent viewers share one upstream sweep per colo.
+- **Change detection runs server-side**: each fresh `/api/status` sweep is compared against `last_status` in KV; transitions email the admin + subscribers (Resend batch), throttled to one alert per service per hour via `notify_sent:{name}` keys. Nothing a client sends can trigger or shape an email.
+- **State (KV):** `subscribers` `[{ email, token, subscribedAt }]`, `last_status` `{name: status}`, `notify_sent:{name}` cooldown markers (TTL 1 h).
 
 ### Endpoints
 
 | Route | Method | Behavior | Needs |
 |---|---|---|---|
-| `/api/status` | GET | Health‑checks the 9 first‑party sites in parallel (GET, 10 s timeout). Returns `{ services: [{ name, url, status, statusCode, rt }], checkedAt }`. **Rules:** HTTP ≥ 500 → `down`; 400–499 → `degraded`; `rt` > 2500 ms → `degraded`; else `up`. | — |
-| `/api/third-party-status` | GET | Checks provider status pages (GitHub, Cloudflare, Anthropic, Resend, Google Cloud), 8 s timeout, with provider‑specific parsing (e.g. Cloudflare filtered to Brazil PoPs). | — |
+| `/api/status` | GET | Health‑checks the 9 first‑party sites in parallel (GET, 10 s timeout). Returns `{ services: [{ name, url, status, statusCode, rt }], checkedAt }`. **Rules:** HTTP ≥ 500 → `down`; 400–499 → `degraded`; `rt` > 2500 ms → `degraded`; else `up`. Edge-cached 30 s. On fresh sweeps, also runs server-side change detection + alert emails. | (emails need `RESEND_API_KEY`, `NOTIFY_TO`, `STATUS_KV`) |
+| `/api/third-party-status` | GET | Checks provider status pages (GitHub, Cloudflare, Anthropic, Resend, Google Cloud), 8 s timeout, with provider‑specific parsing (e.g. Cloudflare filtered to Brazil PoPs). Edge-cached 30 s. | — |
 | `/api/subscribe` | POST | Adds an email to KV (with a UUID token), sends a welcome email via Resend. Returns `{ ok, already }`. | `RESEND_API_KEY`, `NOTIFY_TO`, `NOTIFY_FROM`, `STATUS_KV` |
 | `/api/unsubscribe?token=…` | GET | Removes the subscriber matching `token`, returns a small HTML confirmation page. | `STATUS_KV` |
-| `/api/notify-all` | POST | Sent by the page on a detected status change. Emails the admin + all subscribers (Resend batch), each with an unsubscribe link. | `RESEND_API_KEY`, `NOTIFY_TO`, `NOTIFY_FROM`, `STATUS_KV` |
+| `/api/healthz` | GET | Liveness + config probe: `{ ok, kv, resendKey, notifyTo }` (booleans only). | — |
 
 ### Monitored first‑party services
 
