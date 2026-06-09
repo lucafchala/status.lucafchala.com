@@ -27,14 +27,16 @@ export async function onRequestPost({ request, env }) {
           subject: `Nova inscrição pendente — ${email}`,
           html: `<p style="font-family:monospace">${esc(email)} quer receber alertas mas STATUS_KV não está configurado. Adicione o binding no Cloudflare Pages.</p>`,
         }),
-      }).catch(() => {});
+      }).catch(e => console.error('pending-subscription email failed', e));
     }
     return json({ error: 'Armazenamento não configurado (STATUS_KV ausente)' }, 500);
   }
 
-  // 1 read
+  // 1 read — guard the parse so corrupt KV can't 500 the endpoint
   const raw = await KV.get('subscribers');
-  const subs = raw ? JSON.parse(raw) : [];
+  let subs = [];
+  try { subs = raw ? JSON.parse(raw) : []; } catch { subs = []; }
+  if (!Array.isArray(subs)) subs = [];
 
   if (subs.some(s => s.email === email)) {
     return json({ ok: true, already: true });
