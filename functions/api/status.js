@@ -35,9 +35,19 @@ async function checkOne(svc) {
 
 // Pure check — zero KV operations.
 // Change detection and notifications are handled client-side via localStorage.
-export async function onRequestGet() {
+// Edge-cached for 30 s so concurrent viewers share one upstream sweep per colo
+// instead of fanning out 9 fetches per tab per minute.
+export async function onRequestGet(context) {
+  const cache = caches.default;
+  const cacheKey = new Request(context.request.url);
+  const hit = await cache.match(cacheKey);
+  if (hit) return hit;
+
   const services = await Promise.all(SERVICES.map(checkOne));
-  return new Response(JSON.stringify({ services, checkedAt: new Date().toISOString() }), {
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  const res = new Response(JSON.stringify({ services, checkedAt: new Date().toISOString() }), {
+    // s-maxage caches at the edge only; max-age=0 keeps browsers revalidating
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=0, s-maxage=30' },
   });
+  context.waitUntil(cache.put(cacheKey, res.clone()));
+  return res;
 }

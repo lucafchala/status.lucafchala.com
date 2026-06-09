@@ -147,12 +147,22 @@ async function checkOne(svc) {
   }
 }
 
-export async function onRequestGet() {
+// Edge-cached for 30 s so concurrent viewers share one upstream sweep per colo
+// instead of fanning out 6 fetches per tab per minute.
+export async function onRequestGet(context) {
+  const cache = caches.default;
+  const cacheKey = new Request(context.request.url);
+  const hit = await cache.match(cacheKey);
+  if (hit) return hit;
+
   const results = await Promise.all(SERVICES.map(checkOne));
-  return new Response(JSON.stringify({ services: results }), {
+  const res = new Response(JSON.stringify({ services: results }), {
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
+      // s-maxage caches at the edge only; max-age=0 keeps browsers revalidating
+      'Cache-Control': 'public, max-age=0, s-maxage=30',
     },
   });
+  context.waitUntil(cache.put(cacheKey, res.clone()));
+  return res;
 }
