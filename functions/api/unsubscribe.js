@@ -19,7 +19,13 @@ export async function onRequestGet({ request, env }) {
   // 1 write
   await KV.put('subscribers', JSON.stringify(subs));
 
-  return page(`Inscrição de ${email} cancelada.`, true);
+  return page(`Inscrição de ${esc(email)} cancelada.`, true);
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
 function page(message, success) {

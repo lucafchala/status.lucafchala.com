@@ -6,7 +6,7 @@ export async function onRequestPost({ request, env }) {
     return json({ error: 'JSON inválido' }, 400);
   }
   email = (email || '').trim().toLowerCase();
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!email || email.length > 254 || !/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/.test(email)) {
     return json({ error: 'Email inválido' }, 400);
   }
 
@@ -25,7 +25,7 @@ export async function onRequestPost({ request, env }) {
           from: NOTIFY_FROM,
           to: [NOTIFY_TO],
           subject: `Nova inscrição pendente — ${email}`,
-          html: `<p style="font-family:monospace">${email} quer receber alertas mas STATUS_KV não está configurado. Adicione o binding no Cloudflare Pages.</p>`,
+          html: `<p style="font-family:monospace">${esc(email)} quer receber alertas mas STATUS_KV não está configurado. Adicione o binding no Cloudflare Pages.</p>`,
         }),
       }).catch(() => {});
     }
@@ -83,6 +83,12 @@ function welcomeHtml(unsubUrl) {
     <a href="https://status.lucafchala.com" style="color:#c08030;text-decoration:none">status.lucafchala.com</a>
   </p>
 </body></html>`;
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
 function json(data, status = 200) {
