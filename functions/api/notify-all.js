@@ -1,32 +1,59 @@
 // Called by the browser when it detects a status change (via localStorage diff).
-// Cost: 1 KV read + 1 Resend batch call — only triggered on actual changes.
+// The endpoint is public, so the payload is untrusted: only known services are
+// accepted (URL comes from our own list, never the request), transitions must be
+// valid, and a KV cooldown enforces at most one alert per service per hour —
+// the client's localStorage cooldown is advisory only.
+
+import { SERVICES } from './status.js';
+
+const VALID_STATUS = new Set(['up', 'degraded', 'down']);
+const COOLDOWN_S = 3600; // mirrors the client's NOTIFY_COOLDOWN_MS
+const MAX_CHANGES = 20;
 
 export async function onRequestPost({ request, env }) {
   const { RESEND_API_KEY, NOTIFY_TO, NOTIFY_FROM = 'status@lucafchala.com', STATUS_KV: KV } = env;
-  if (!RESEND_API_KEY || !NOTIFY_TO) return ok();
+  if (!RESEND_API_KEY || !NOTIFY_TO || !KV) return ok();
 
   let changes;
   try { ({ changes } = await request.json()); } catch { return ok(); }
   if (!Array.isArray(changes) || changes.length === 0) return ok();
 
-  // 1 KV read — only subscribers, nothing else
-  const subsRaw = KV ? await KV.get('subscribers') : null;
+  const byName = new Map(SERVICES.map(s => [s.name, s.url]));
+  const seen = new Set();
+  const accepted = [];
+  for (const c of changes.slice(0, MAX_CHANGES)) {
+    if (!c || typeof c.name !== 'string' || !byName.has(c.name) || seen.has(c.name)) continue;
+    if (!VALID_STATUS.has(c.from) || !VALID_STATUS.has(c.to) || c.from === c.to) continue;
+    seen.add(c.name);
+    accepted.push({ name: c.name, url: byName.get(c.name), from: c.from, to: c.to });
+  }
+
+  const notifiable = [];
+  for (const c of accepted) {
+    const key = `notify_sent:${c.name}`;
+    if (await KV.get(key)) continue;
+    await KV.put(key, '1', { expirationTtl: COOLDOWN_S });
+    notifiable.push(c);
+  }
+  if (notifiable.length === 0) return ok();
+
+  const subsRaw = await KV.get('subscribers');
   const subscribers = subsRaw ? JSON.parse(subsRaw) : [];
 
   const to = [NOTIFY_TO, ...subscribers.map(s => s.email)];
   const deduped = [...new Set(to)];
 
-  const rows = changes.map(c =>
+  const rows = notifiable.map(c =>
     `<tr>
-      <td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px">${c.name}</td>
+      <td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px">${esc(c.name)}</td>
       <td style="padding:6px 8px;font-family:monospace;font-size:12px">${icon(c.from)} → ${icon(c.to)}</td>
-      <td style="padding:6px 0;font-family:monospace;font-size:11px;color:#9a8f80">${c.url || ''}</td>
+      <td style="padding:6px 0;font-family:monospace;font-size:11px;color:#9a8f80">${esc(c.url)}</td>
     </tr>`
   ).join('');
 
-  const subject = changes.length === 1
-    ? `${icon(changes[0].to)} ${changes[0].name} — status.lucafchala.com`
-    : `${changes.length} mudanças de status — status.lucafchala.com`;
+  const subject = notifiable.length === 1
+    ? `${icon(notifiable[0].to)} ${notifiable[0].name} — status.lucafchala.com`
+    : `${notifiable.length} mudanças de status — status.lucafchala.com`;
 
   // 1 Resend batch call for everyone (admin + subscribers)
   const batch = deduped.map(email => {
@@ -44,6 +71,12 @@ export async function onRequestPost({ request, env }) {
   }).catch(() => {});
 
   return ok();
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
 function icon(s) {

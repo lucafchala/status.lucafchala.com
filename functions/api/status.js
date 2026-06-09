@@ -1,4 +1,4 @@
-const SERVICES = [
+export const SERVICES = [
   { name: 'lucafchala.com',    url: 'https://lucafchala.com' },
   { name: 'Rádio',             url: 'https://radio.lucafchala.com' },
   { name: 'Fotos',             url: 'https://fotos.lucafchala.com' },
