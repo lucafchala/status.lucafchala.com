@@ -12,7 +12,11 @@
   <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
   <script>
-    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch(e) {}
+    try {
+      const t = localStorage.getItem('theme');
+      if (t) document.documentElement.setAttribute('data-theme', t);
+      else if (window.matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {}
   </script>
   <style>
     :root {
@@ -207,7 +211,6 @@
       text-decoration: none;
       color: inherit;
       transition: border-color 0.15s, background 0.15s, transform 0.15s;
-      cursor: default;
     }
     .service:hover {
       border-color: var(--accent-dim);
@@ -343,8 +346,6 @@
     /* Subscribe */
     .subscribe-wrap {
       margin-top: 20px;
-      display: flex;
-      align-items: center;
       min-height: 28px;
       animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.48s both;
     }
@@ -368,6 +369,13 @@
     }
     .sub-input:focus { border-color: var(--accent); }
     .sub-input::placeholder { color: var(--muted); }
+
+    /* Subscribe column layout so error can stack below form */
+    .subscribe-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
 
     @media (max-width: 480px) {
       body { padding: 36px 20px 60px; }
@@ -532,7 +540,8 @@
   function renderSkeletons() {
     const list = document.getElementById('services-list');
     list.innerHTML = SERVICES.map((svc, i) => `
-      <div class="service" id="svc-${i}" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
+      <a class="service" href="${svc.url}" target="_blank" rel="noopener"
+         id="svc-${i}" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
         <div class="status-dot checking" id="dot-${i}"></div>
         <div class="service-info">
           <span class="service-name">${svc.name}</span>
@@ -543,7 +552,7 @@
           <span class="service-rt" id="rt-${i}"></span>
           <span class="service-rt" id="code-${i}" style="opacity:0.6"></span>
         </div>
-      </div>
+      </a>
     `).join('');
   }
 
@@ -678,23 +687,29 @@
         body: JSON.stringify({ email }),
       });
       const data = await res.json();
-      document.getElementById('sub-form').style.display = 'none';
       if (data.already) {
+        document.getElementById('sub-form').style.display = 'none';
         document.getElementById('sub-already').style.display = '';
       } else if (data.ok) {
+        document.getElementById('sub-form').style.display = 'none';
         document.getElementById('sub-done').style.display = '';
       } else {
+        btn.disabled = false;
+        btn.textContent = 'ok';
         showSubError(data.error);
       }
     } catch (e) {
-      document.getElementById('sub-form').style.display = 'none';
+      btn.disabled = false;
+      btn.textContent = 'ok';
       showSubError('Falha de rede — tente novamente');
     }
   }
 
   // Init theme button label
   try {
-    const t = localStorage.getItem('theme') || 'dark';
+    const stored = localStorage.getItem('theme');
+    const sysPref = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    const t = stored || sysPref;
     document.getElementById('btn-theme').textContent = t === 'dark' ? 'light' : 'dark';
   } catch(e) {}
 
