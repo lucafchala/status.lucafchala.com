@@ -67,56 +67,21 @@ async function detectAndNotify(env, services) {
   for (const s of services) next[s.name] = s.status;
   await KV.put('last_status', JSON.stringify(next));
 
-  // All transitions — for incident log, independent of notification cooldown
-  const transitions = services
-    .filter(s => prev[s.name] && prev[s.name] !== s.status)
-    .map(s => ({ name: s.name, url: s.url, from: prev[s.name], to: s.status }));
-
-  if (transitions.length > 0) {
-    await recordIncidents(KV, transitions).catch(e => console.error('incident log failed', e));
-  }
-
   if (!env.RESEND_API_KEY || !env.NOTIFY_TO) return;
 
   const changes = [];
-  for (const c of transitions) {
+  for (const s of services) {
+    const p = prev[s.name];
+    if (!p || p === s.status) continue;
     // KV is eventually consistent, so two colos sweeping at once can rarely
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
-    if (await KV.get(`notify_sent:${c.name}`)) continue;
-    await KV.put(`notify_sent:${c.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
-    changes.push(c);
+    if (await KV.get(`notify_sent:${s.name}`)) continue;
+    await KV.put(`notify_sent:${s.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+    changes.push({ name: s.name, url: s.url, from: p, to: s.status });
   }
   if (changes.length === 0) return;
 
   await sendAlerts(env, changes).catch(e => console.error('status alert email failed', e));
-}
-
-async function recordIncidents(KV, transitions) {
-  let incidents = [];
-  try {
-    incidents = JSON.parse(await KV.get('incidents') || '[]') || [];
-  } catch { incidents = []; }
-  if (!Array.isArray(incidents)) incidents = [];
-
-  const now = new Date().toISOString();
-  for (const c of transitions) {
-    if (c.to !== 'up') {
-      // Service degraded or went down — open a new incident
-      incidents.push({ name: c.name, url: c.url, status: c.to, at: now, resolvedAt: null });
-    } else {
-      // Service recovered — close the most recent open incident for this service
-      for (let i = incidents.length - 1; i >= 0; i--) {
-        if (incidents[i].name === c.name && incidents[i].resolvedAt === null) {
-          incidents[i].resolvedAt = now;
-          break;
-        }
-      }
-    }
-  }
-
-  // Keep last 100
-  if (incidents.length > 100) incidents = incidents.slice(incidents.length - 100);
-  await KV.put('incidents', JSON.stringify(incidents));
 }
 
 async function sendAlerts(env, changes) {

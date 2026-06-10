@@ -370,17 +370,6 @@
     .sub-input:focus { border-color: var(--accent); }
     .sub-input::placeholder { color: var(--muted); }
 
-    /* Incidents */
-    .incident-empty {
-      padding: 12px 14px;
-      font-size: 10px;
-      color: var(--muted);
-      letter-spacing: 0.06em;
-      border: 1px solid var(--border);
-      border-radius: 3px;
-      background: var(--ctrl-bg);
-    }
-
     /* Subscribe column layout so error can stack below form */
     .subscribe-wrap {
       display: flex;
@@ -421,11 +410,6 @@
 
   <div class="rule section-anim-2">terceiros</div>
   <div class="services section-anim-2" id="third-party-list"></div>
-
-  <div class="rule section-anim-3">incidentes</div>
-  <div class="services section-anim-3" id="incidents-list">
-    <div class="incident-empty">verificando…</div>
-  </div>
 
   <div class="refresh-row">
     <span class="last-checked" id="last-checked">–</span>
@@ -616,71 +600,6 @@
     el.textContent = `verificado às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
   }
 
-  function timeAgo(isoStr) {
-    const diff = Date.now() - new Date(isoStr).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'agora';
-    if (mins < 60) return `há ${mins} min`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `há ${hours}h`;
-    return `há ${Math.floor(hours / 24)}d`;
-  }
-
-  function durationStr(start, end) {
-    const diff = new Date(end).getTime() - new Date(start).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return '< 1 min';
-    if (mins < 60) return `${mins} min`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h`;
-    return `${Math.floor(hours / 24)}d`;
-  }
-
-  function escHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  async function fetchIncidents() {
-    try {
-      const res = await fetch('/api/incidents', { cache: 'no-store' });
-      const json = await res.json();
-      return json.incidents || [];
-    } catch {
-      return [];
-    }
-  }
-
-  function renderIncidents(incidents) {
-    const list = document.getElementById('incidents-list');
-    if (!incidents.length) {
-      list.innerHTML = '<div class="incident-empty">nenhum incidente recente</div>';
-      return;
-    }
-    list.innerHTML = incidents.map(inc => {
-      const when = timeAgo(inc.at);
-      const statusCls = inc.status === 'down' ? 'down' : 'degraded';
-      const statusTxt = inc.status === 'down' ? 'offline' : 'lento';
-      const dotCls    = inc.resolvedAt ? 'up' : statusCls;
-      const labelCls  = inc.resolvedAt ? 'up' : statusCls;
-      const labelTxt  = inc.resolvedAt ? 'resolvido' : statusTxt;
-      const meta2     = inc.resolvedAt ? durationStr(inc.at, inc.resolvedAt) : 'em curso';
-      return `
-        <div class="service">
-          <div class="status-dot ${dotCls}"></div>
-          <div class="service-info">
-            <span class="service-name">${escHtml(inc.name)}</span>
-            <span class="service-url">${escHtml(inc.url.replace('https://', ''))}</span>
-          </div>
-          <div class="service-meta">
-            <span class="service-status-label ${labelCls}">${labelTxt}</span>
-            <span class="service-rt">${when}</span>
-            <span class="service-rt">${meta2}</span>
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-
   async function runChecks() {
     if (checking) return;
     checking = true;
@@ -708,7 +627,6 @@
     const [[results]] = await Promise.all([
       fetchStatus().then(svcs => { svcs.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r)); return [svcs]; }),
       fetchThirdPartyStatus().then(svcs => svcs.forEach(r => updateThirdPartyRow(THIRD_PARTY.findIndex(s => s.name === r.name), r))),
-      fetchIncidents().then(renderIncidents),
     ]);
 
     updateBanner(results);
