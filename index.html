@@ -460,46 +460,9 @@
   ];
 
   const REFRESH_INTERVAL_MS = 60000;
-  const NOTIFY_COOLDOWN_MS  = 60 * 60 * 1000; // 1 hour per service
 
   let refreshTimer = null;
   let checking = false;
-
-  // Detect status changes vs last known state (localStorage), fire /api/notify-all once per change.
-  // Zero server calls during stable operation — only fires when something actually changes.
-  function detectChanges(results) {
-    const now = Date.now();
-    let prev   = {};
-    let sent   = {};
-    try { prev = JSON.parse(localStorage.getItem('last_status') || '{}'); } catch(e) {}
-    try { sent = JSON.parse(localStorage.getItem('notify_sent') || '{}'); } catch(e) {}
-
-    const changes = [];
-    for (const svc of results) {
-      const p = prev[svc.name];
-      if (p && p !== svc.status) {
-        const lastSent = sent[svc.name] || 0;
-        if (now - lastSent >= NOTIFY_COOLDOWN_MS) {
-          changes.push({ name: svc.name, url: svc.url, from: p, to: svc.status });
-          sent[svc.name] = now;
-        }
-      }
-    }
-
-    // Always update last known state
-    const newState = {};
-    for (const svc of results) newState[svc.name] = svc.status;
-    try { localStorage.setItem('last_status', JSON.stringify(newState)); } catch(e) {}
-
-    if (changes.length === 0) return;
-    try { localStorage.setItem('notify_sent', JSON.stringify(sent)); } catch(e) {}
-
-    fetch('/api/notify-all', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ changes }),
-    }).catch(() => {});
-  }
 
   async function fetchThirdPartyStatus() {
     try {
@@ -538,7 +501,6 @@
     if (code >= 200 && code < 400) return '';   // normal — don't clutter
     return 'HTTP ' + code;
   }
-// just to force a redploy easily
   function renderThirdPartySkeletons() {
     const list = document.getElementById('third-party-list');
     list.innerHTML = THIRD_PARTY.map((svc, i) => `
@@ -547,7 +509,7 @@
         <div class="status-dot checking" id="tp-dot-${i}"></div>
         <div class="service-info">
           <span class="service-name">${svc.name}</span>
-          <span class="service-url" id="tp-desc-${i}">${(svc.statusApi || svc.url || '').replace('https://', '')}</span>
+          <span class="service-url" id="tp-desc-${i}">${svc.page.replace('https://', '')}</span>
         </div>
         <div class="service-meta">
           <span class="service-status-label" id="tp-lbl-${i}">—</span>
@@ -651,16 +613,15 @@
       if (dot) dot.className = 'status-dot checking';
     });
 
-    // Check all in parallel server-side — avoids browser DNS cache / CORS issues
+    // Check all in parallel server-side — avoids browser DNS cache / CORS issues.
+    // Rows are matched by service name so client/server array order can differ.
     const [[results]] = await Promise.all([
-      fetchStatus().then(svcs => { svcs.forEach((r, i) => updateServiceRow(i, r)); return [svcs]; }),
-      fetchThirdPartyStatus().then(svcs => svcs.forEach((r, i) => updateThirdPartyRow(i, r))),
+      fetchStatus().then(svcs => { svcs.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r)); return [svcs]; }),
+      fetchThirdPartyStatus().then(svcs => svcs.forEach(r => updateThirdPartyRow(THIRD_PARTY.findIndex(s => s.name === r.name), r))),
     ]);
 
     updateBanner(results);
     updateLastChecked();
-
-    detectChanges(results);
 
     btn.disabled = false;
     btn.textContent = '↻ verificar agora';

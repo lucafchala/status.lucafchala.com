@@ -6,9 +6,11 @@ export async function onRequestGet({ request, env }) {
 
   if (!KV || !token) return page('Link inválido.', false);
 
-  // 1 read
+  // 1 read — guard the parse so corrupt KV can't 500 the endpoint
   const raw = await KV.get('subscribers');
-  const subs = raw ? JSON.parse(raw) : [];
+  let subs = [];
+  try { subs = raw ? JSON.parse(raw) : []; } catch { subs = []; }
+  if (!Array.isArray(subs)) subs = [];
   const idx = subs.findIndex(s => s.token === token);
 
   if (idx === -1) return page('Link inválido ou já utilizado.', false);
@@ -19,7 +21,13 @@ export async function onRequestGet({ request, env }) {
   // 1 write
   await KV.put('subscribers', JSON.stringify(subs));
 
-  return page(`Inscrição de ${email} cancelada.`, true);
+  return page(`Inscrição de ${esc(email)} cancelada.`, true);
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
 function page(message, success) {

@@ -1,0 +1,42 @@
+name: checks
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON files
+        run: |
+          set -e
+          find . -name '*.json' -not -path '*/node_modules/*' -not -path './.git/*' | while read -r f; do
+            python3 -m json.tool "$f" > /dev/null || { echo "Invalid JSON: $f"; exit 1; }
+          done
+
+      - name: Forbid weak HTML escapers (must also escape quotes)
+        run: |
+          if grep -rnE --include='*.html' --include='*.js' --exclude-dir=node_modules --exclude-dir=.git "replace\(/>/g, ?'&gt;'\) *[;)]" .; then
+            echo "Found a 3-char HTML escaper - use the canonical 5-char version that also escapes quotes"
+            exit 1
+          fi
+
+      - name: Security headers file present
+        run: test -f _headers
+
+      - name: JS module syntax check (functions)
+        run: |
+          node -e '
+            const files = process.argv.slice(1);
+            (async () => {
+              for (const f of files) {
+                try { await import(process.cwd() + "/" + f); console.log("OK", f); }
+                catch (e) {
+                  if (e instanceof SyntaxError) { console.error("SYNTAX FAIL", f, e.message); process.exit(1); }
+                  console.log("OK (runtime-only error)", f);
+                }
+              }
+            })();
+          ' $(find functions -name "*.js")
