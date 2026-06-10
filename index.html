@@ -12,7 +12,11 @@
   <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
   <script>
-    try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch(e) {}
+    try {
+      const t = localStorage.getItem('theme');
+      if (t) document.documentElement.setAttribute('data-theme', t);
+      else if (window.matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {}
   </script>
   <style>
     :root {
@@ -207,7 +211,6 @@
       text-decoration: none;
       color: inherit;
       transition: border-color 0.15s, background 0.15s, transform 0.15s;
-      cursor: default;
     }
     .service:hover {
       border-color: var(--accent-dim);
@@ -343,8 +346,6 @@
     /* Subscribe */
     .subscribe-wrap {
       margin-top: 20px;
-      display: flex;
-      align-items: center;
       min-height: 28px;
       animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) 0.48s both;
     }
@@ -368,6 +369,24 @@
     }
     .sub-input:focus { border-color: var(--accent); }
     .sub-input::placeholder { color: var(--muted); }
+
+    /* Incidents */
+    .incident-empty {
+      padding: 12px 14px;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--ctrl-bg);
+    }
+
+    /* Subscribe column layout so error can stack below form */
+    .subscribe-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
 
     @media (max-width: 480px) {
       body { padding: 36px 20px 60px; }
@@ -402,6 +421,11 @@
 
   <div class="rule section-anim-2">terceiros</div>
   <div class="services section-anim-2" id="third-party-list"></div>
+
+  <div class="rule section-anim-3">incidentes</div>
+  <div class="services section-anim-3" id="incidents-list">
+    <div class="incident-empty">verificando…</div>
+  </div>
 
   <div class="refresh-row">
     <span class="last-checked" id="last-checked">–</span>
@@ -532,7 +556,8 @@
   function renderSkeletons() {
     const list = document.getElementById('services-list');
     list.innerHTML = SERVICES.map((svc, i) => `
-      <div class="service" id="svc-${i}" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
+      <a class="service" href="${svc.url}" target="_blank" rel="noopener"
+         id="svc-${i}" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
         <div class="status-dot checking" id="dot-${i}"></div>
         <div class="service-info">
           <span class="service-name">${svc.name}</span>
@@ -543,7 +568,7 @@
           <span class="service-rt" id="rt-${i}"></span>
           <span class="service-rt" id="code-${i}" style="opacity:0.6"></span>
         </div>
-      </div>
+      </a>
     `).join('');
   }
 
@@ -591,6 +616,71 @@
     el.textContent = `verificado às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
   }
 
+  function timeAgo(isoStr) {
+    const diff = Date.now() - new Date(isoStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'agora';
+    if (mins < 60) return `há ${mins} min`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `há ${hours}h`;
+    return `há ${Math.floor(hours / 24)}d`;
+  }
+
+  function durationStr(start, end) {
+    const diff = new Date(end).getTime() - new Date(start).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return '< 1 min';
+    if (mins < 60) return `${mins} min`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h`;
+    return `${Math.floor(hours / 24)}d`;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  async function fetchIncidents() {
+    try {
+      const res = await fetch('/api/incidents', { cache: 'no-store' });
+      const json = await res.json();
+      return json.incidents || [];
+    } catch {
+      return [];
+    }
+  }
+
+  function renderIncidents(incidents) {
+    const list = document.getElementById('incidents-list');
+    if (!incidents.length) {
+      list.innerHTML = '<div class="incident-empty">nenhum incidente recente</div>';
+      return;
+    }
+    list.innerHTML = incidents.map(inc => {
+      const when = timeAgo(inc.at);
+      const statusCls = inc.status === 'down' ? 'down' : 'degraded';
+      const statusTxt = inc.status === 'down' ? 'offline' : 'lento';
+      const dotCls    = inc.resolvedAt ? 'up' : statusCls;
+      const labelCls  = inc.resolvedAt ? 'up' : statusCls;
+      const labelTxt  = inc.resolvedAt ? 'resolvido' : statusTxt;
+      const meta2     = inc.resolvedAt ? durationStr(inc.at, inc.resolvedAt) : 'em curso';
+      return `
+        <div class="service">
+          <div class="status-dot ${dotCls}"></div>
+          <div class="service-info">
+            <span class="service-name">${escHtml(inc.name)}</span>
+            <span class="service-url">${escHtml(inc.url.replace('https://', ''))}</span>
+          </div>
+          <div class="service-meta">
+            <span class="service-status-label ${labelCls}">${labelTxt}</span>
+            <span class="service-rt">${when}</span>
+            <span class="service-rt">${meta2}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
   async function runChecks() {
     if (checking) return;
     checking = true;
@@ -618,6 +708,7 @@
     const [[results]] = await Promise.all([
       fetchStatus().then(svcs => { svcs.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r)); return [svcs]; }),
       fetchThirdPartyStatus().then(svcs => svcs.forEach(r => updateThirdPartyRow(THIRD_PARTY.findIndex(s => s.name === r.name), r))),
+      fetchIncidents().then(renderIncidents),
     ]);
 
     updateBanner(results);
@@ -678,23 +769,29 @@
         body: JSON.stringify({ email }),
       });
       const data = await res.json();
-      document.getElementById('sub-form').style.display = 'none';
       if (data.already) {
+        document.getElementById('sub-form').style.display = 'none';
         document.getElementById('sub-already').style.display = '';
       } else if (data.ok) {
+        document.getElementById('sub-form').style.display = 'none';
         document.getElementById('sub-done').style.display = '';
       } else {
+        btn.disabled = false;
+        btn.textContent = 'ok';
         showSubError(data.error);
       }
     } catch (e) {
-      document.getElementById('sub-form').style.display = 'none';
+      btn.disabled = false;
+      btn.textContent = 'ok';
       showSubError('Falha de rede — tente novamente');
     }
   }
 
   // Init theme button label
   try {
-    const t = localStorage.getItem('theme') || 'dark';
+    const stored = localStorage.getItem('theme');
+    const sysPref = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    const t = stored || sysPref;
     document.getElementById('btn-theme').textContent = t === 'dark' ? 'light' : 'dark';
   } catch(e) {}
 
