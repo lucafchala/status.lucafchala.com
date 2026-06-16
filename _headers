@@ -5,3 +5,9 @@
   X-Frame-Options: DENY
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: geolocation=(), microphone=(), camera=()
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-site
+
+# Agent/crawler discovery hints on the homepage (RFC 8288).
+/
+  Link: <https://status.lucafchala.com/>; rel="canonical", </sitemap.xml>; rel="sitemap"

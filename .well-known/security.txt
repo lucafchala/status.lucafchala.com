@@ -1,0 +1,5 @@
+Contact: mailto:security@lucafchala.com
+Expires: 2027-01-20T14:54:00Z
+Encryption: https://keys.openpgp.org/vks/v1/by-fingerprint/48E73F6FA2871E7B86EFEA648EC4329A369B7B33
+Canonical: https://status.lucafchala.com/.well-known/security.txt
+Preferred-Languages: en, pt-BR
