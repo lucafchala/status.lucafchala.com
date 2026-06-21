@@ -289,6 +289,73 @@
       letter-spacing: 0.04em;
     }
 
+    /* Per-service functional checks */
+    .service-card {
+      display: flex;
+      flex-direction: column;
+    }
+    .checks {
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      margin-top: 5px;
+      padding: 10px 14px 11px 30px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--ctrl-bg);
+    }
+    .checks.show { display: flex; }
+    .check {
+      display: flex;
+      align-items: baseline;
+      gap: 9px;
+      font-size: 10px;
+      line-height: 1.5;
+    }
+    .check-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      align-self: center;
+      background: var(--muted);
+    }
+    .check-dot.up { background: var(--up); }
+    .check-dot.degraded { background: var(--degraded); box-shadow: 0 0 4px var(--degraded); }
+    .check-dot.down { background: var(--down); box-shadow: 0 0 4px var(--down); }
+    .check-label {
+      color: var(--muted);
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .check-detail {
+      margin-left: auto;
+      padding-left: 10px;
+      text-align: right;
+      letter-spacing: 0.02em;
+    }
+    .check-detail.up { color: var(--muted); opacity: 0.65; }
+    .check-detail.degraded { color: var(--degraded); }
+    .check-detail.down { color: var(--down); }
+    .checks-toggle {
+      align-self: flex-start;
+      margin-top: 4px;
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      cursor: pointer;
+      padding: 2px 0 0 30px;
+      transition: color 0.15s;
+    }
+    .checks-toggle:hover { color: var(--accent); }
+    .checks-toggle.has-problems { color: var(--down); }
+
     /* Refresh button */
     .refresh-row {
       display: flex;
@@ -542,20 +609,30 @@
   function renderSkeletons() {
     const list = document.getElementById('services-list');
     list.innerHTML = SERVICES.map((svc, i) => `
-      <a class="service" href="${svc.url}" target="_blank" rel="noopener"
-         id="svc-${i}" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
-        <div class="status-dot checking" id="dot-${i}"></div>
-        <div class="service-info">
-          <span class="service-name">${svc.name}</span>
-          <span class="service-url">${svc.url.replace('https://', '')}</span>
-        </div>
-        <div class="service-meta">
-          <span class="service-status-label" id="lbl-${i}">—</span>
-          <span class="service-rt" id="rt-${i}"></span>
-          <span class="service-rt" id="code-${i}" style="opacity:0.6"></span>
-        </div>
-      </a>
+      <div class="service-card" style="animation: rise 0.9s cubic-bezier(0.16,1,0.3,1) ${0.20 + i * 0.06}s both">
+        <a class="service" href="${svc.url}" target="_blank" rel="noopener" id="svc-${i}">
+          <div class="status-dot checking" id="dot-${i}"></div>
+          <div class="service-info">
+            <span class="service-name">${svc.name}</span>
+            <span class="service-url">${svc.url.replace('https://', '')}</span>
+          </div>
+          <div class="service-meta">
+            <span class="service-status-label" id="lbl-${i}">—</span>
+            <span class="service-rt" id="rt-${i}"></span>
+            <span class="service-rt" id="code-${i}" style="opacity:0.6"></span>
+          </div>
+        </a>
+        <button class="checks-toggle" id="toggle-${i}" type="button" aria-expanded="false"
+                aria-controls="checks-${i}" onclick="toggleChecks(${i})" hidden></button>
+        <div class="checks" id="checks-${i}" role="region"></div>
+      </div>
     `).join('');
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
   }
 
   function updateServiceRow(i, result) {
@@ -569,6 +646,50 @@
     lbl.textContent = statusLabel(result.status);
     rt.textContent = rtLabel(result.rt, result.status);
     if (code) code.textContent = codeLabel(result.statusCode);
+    renderChecks(i, result);
+  }
+
+  // Renders the per-service functional breakdown. A service with any failing
+  // check auto-expands (so a problem is never hidden behind a click); a fully
+  // healthy service collapses behind a "N verificações ok" toggle.
+  function renderChecks(i, result) {
+    const panel  = document.getElementById(`checks-${i}`);
+    const toggle = document.getElementById(`toggle-${i}`);
+    if (!panel || !toggle) return;
+
+    const checks = result.checks || [];
+    if (!checks.length) { toggle.hidden = true; panel.classList.remove('show'); panel.innerHTML = ''; return; }
+
+    panel.innerHTML = checks.map(c => `
+      <div class="check">
+        <span class="check-dot ${c.status}"></span>
+        <span class="check-label">${esc(c.label)}</span>
+        <span class="check-detail ${c.status}">${esc(c.detail || (c.status === 'up' ? 'ok' : statusLabel(c.status)))}</span>
+      </div>
+    `).join('');
+
+    const problems = checks.filter(c => c.status !== 'up').length;
+    toggle.hidden = false;
+    toggle.classList.toggle('has-problems', problems > 0);
+
+    if (problems > 0) {
+      panel.classList.add('show');
+      toggle.setAttribute('aria-expanded', 'true');
+      toggle.textContent = `▾ ${problems} problema${problems > 1 ? 's' : ''}`;
+    } else {
+      panel.classList.remove('show');
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.textContent = `▸ ${checks.length} verificaç${checks.length > 1 ? 'ões' : 'ão'} ok`;
+    }
+  }
+
+  function toggleChecks(i) {
+    const panel  = document.getElementById(`checks-${i}`);
+    const toggle = document.getElementById(`toggle-${i}`);
+    if (!panel || !toggle) return;
+    const open = panel.classList.toggle('show');
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.textContent = (open ? '▾' : '▸') + toggle.textContent.slice(1);
   }
 
   function updateBanner(results) {
