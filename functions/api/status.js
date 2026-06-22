@@ -95,45 +95,81 @@ async function checkJson(label, url, validate) {
 }
 
 // fotos exposes a deep /api/healthz: { ok, kv, events, d1, hashMs, kvLatencyMs,
-// removalRequests, cron, adminConfigured, config, colo, … }. We dissect *every*
-// field and surface each anomaly as its own line, so the dashboard and the alert
-// email can name exactly which subsystem is unhappy — KV, D1, the daily-cron
-// heartbeat, login hashing, KV latency, or a missing hardening secret. Fields
-// absent on an older healthz payload are simply skipped, so this stays correct
-// even when the two repos deploy independently (status first, fotos later).
-async function checkFotosHealth(label, url) {
-  try {
-    const res = await fetchSvc(url, { headers: { Accept: 'application/json' } });
-    // healthz is rate-limited (10/min/IP); a 429 from our own sweep isn't an
-    // outage, so treat it as a pass rather than poisoning the status.
-    if (res.status === 429) { res.body?.cancel(); return { label, status: 'up', detail: 'rate-limited (ignorado)' }; }
+// cron, selftest, config, colo, … }. We fetch it ONCE per sweep (it's rate-
+// limited to 10/min/IP) and derive THREE dashboard rows from that single
+// response: infra health, the functional self-test, and a deep-probe of a real
+// event page. Fields absent on an older healthz payload are simply skipped, so
+// this stays correct even when the two repos deploy independently.
+function fetchHealthz(url) {
+  return fetchSvc(url, { headers: { Accept: 'application/json' } }).then(async (res) => {
+    // healthz is rate-limited; a 429 from our own sweep isn't an outage.
+    if (res.status === 429) { res.body?.cancel(); return { rateLimited: true }; }
     const text = await res.text();
-    let j;
-    try { j = JSON.parse(text); } catch { return { label, status: 'down', detail: 'healthz sem JSON' }; }
+    try { return { status: res.status, json: JSON.parse(text) }; }
+    catch { return { status: res.status, parseError: true }; }
+  }).catch((e) => ({ netError: netDetail(e) }));
+}
 
-    // Hard down: the one condition fotos itself reports as fatal.
-    if (j.kv === false || j.ok === false) return { label, status: 'down', detail: 'KV indisponível' };
-    if (res.status >= 500)                return { label, status: 'down', detail: `HTTP ${res.status}` };
+// Row 1 — pure infrastructure: KV binding/latency, D1, login hashing, the
+// daily-cron heartbeat. (Form/config problems live in the self-test row.)
+function healthInfra(label, h) {
+  if (h.rateLimited) return { label, status: 'up', detail: 'rate-limited (ignorado)' };
+  if (h.netError)    return { label, status: 'down', detail: h.netError };
+  if (h.parseError)  return { label, status: 'down', detail: 'healthz sem JSON' };
+  const j = h.json;
+  if (j.kv === false || j.ok === false) return { label, status: 'down', detail: 'KV indisponível' };
+  if (h.status >= 500)                  return { label, status: 'down', detail: `HTTP ${h.status}` };
 
-    // Soft problems: collect them all, worst wins, detail lists every one.
-    // (An unconfigured admin isn't checked here — the /dashboard probe already
-    // catches it as a hard 503; keeping it out of healthz saves a KV read.)
-    const issues = [];
-    if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
-    if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
-    if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
-    if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
-    if (j.config && j.config.resend === false)                   issues.push('Resend ausente (e-mails desligados)');
-    if (j.config && j.config.turnstile === false)                issues.push('Turnstile ausente (suporte/consent bloqueados)');
-    if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
+  const issues = [];
+  if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
+  if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
+  if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
+  if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
+  if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
 
-    // Healthy: pack the headline counters into the detail line.
-    const bits = [];
-    if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
-    if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
-    if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
-    if (j.colo) bits.push(j.colo);
-    return { label, status: 'up', detail: bits.join(' · ') };
+  const bits = [];
+  if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
+  if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
+  if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
+  if (j.colo) bits.push(j.colo);
+  return { label, status: 'up', detail: bits.join(' · ') };
+}
+
+// Row 2 — the functional self-test fotos runs over its own data: broken/missing
+// Drive links on live events, bad data (dup slugs, invalid status), and form
+// backends (Turnstile/Resend/ADMIN_EMAIL) that are unset. This is what flags
+// "something we changed went wrong" rather than just a hard 500.
+function healthSelftest(label, h) {
+  if (h.rateLimited) return { label, status: 'up', detail: 'rate-limited (ignorado)' };
+  // If healthz is unreachable/unparseable, the infra row already owns that
+  // outage — don't double-count it here.
+  if (h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
+  const st = h.json.selftest;
+  if (!st) return { label, status: 'up', detail: 'autoteste indisponível (healthz antigo)' };
+  if (Array.isArray(st.problems) && st.problems.length)
+    return { label, status: 'degraded', detail: st.problems.join(' · ') };
+  const bits = [];
+  if (st.drive && typeof st.drive.ok === 'number') bits.push(`Drive ok (${st.drive.ok})`);
+  bits.push('forms ok');
+  return { label, status: 'up', detail: bits.join(' · ') };
+}
+
+// Row 3 — deep-probe a real event page (the healthy slug fotos nominates): the
+// Drive-access gate and the removal form must both render. Sends the per-event
+// view cookie so this monitoring hit never inflates the view counter.
+async function checkEventPage(label, h, base) {
+  const slug = h && h.json && h.json.selftest && h.json.selftest.sample;
+  if (!slug) return { label, status: 'up', detail: 'sem evento p/ testar' };
+  try {
+    const res = await fetchSvc(base + '/' + encodeURIComponent(slug), { headers: { Cookie: `fv_${slug}=1` } });
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status} em /${slug}` }; }
+    if (res.status >= 400) { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status} em /${slug}` }; }
+    const text = await res.text();
+    const missing = [];
+    if (!text.includes('drive-turnstile')) missing.push('gate do Drive');
+    if (!text.includes('rem-turnstile'))   missing.push('form de remoção');
+    if (missing.length) return { label, status: 'degraded', detail: `/${slug}: faltando ${missing.join(' + ')}` };
+    return { label, status: 'up', detail: `/${slug} ok` };
   } catch (e) {
     return { label, status: 'down', detail: netDetail(e) };
   }
@@ -225,34 +261,43 @@ export const SERVICES = [
     // the worst of all of them, and every failure is named — so nothing breaks
     // on fotos without showing up here first.
     name: 'Fotos', url: 'https://fotos.lucafchala.com', marker: 'fotos',
-    checks: (b) => [
-      checkFotosHealth('saúde · KV/D1/hash/cron', b + '/api/healthz'),
-      // Headers are set by the shared html() helper on every HTML response, so we
-      // assert them against the *static* /termos page (no KV read on fotos' side)
-      // instead of the homepage, which would trigger a second events read.
-      checkHeaders('cabeçalhos de segurança', b + '/termos', [
-        'content-security-policy', 'strict-transport-security', 'x-content-type-options',
-        'x-frame-options', 'referrer-policy', 'permissions-policy',
-      ]),
-      checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' }),
-      checkJson('manifest PWA', b + '/manifest.json', (j) => {
-        if (!j || !j.name) return { detail: 'manifest sem nome' };
-        if (!Array.isArray(j.icons) || !j.icons.length || !j.icons[0].src) return { detail: 'manifest sem ícones' };
-        if (!j.start_url)   return { detail: 'manifest sem start_url' };
-        if (!j.theme_color) return { detail: 'manifest sem theme_color' };
-        return null;
-      }),
-      checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' }),
-      checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' }),
-      checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
-      checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' }),
-      checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt'),
-      checkJson('GPC opt-out', b + '/.well-known/gpc.json', (j) => (j && j.gpc === true ? null : { detail: 'gpc≠true' })),
-      checkContent('termos (LGPD)', b + '/termos', { contentType: 'text/html', marker: 'Termos de Uso' }),
-      checkContent('privacidade', b + '/privacidade', { contentType: 'text/html', marker: 'Política de Privacidade' }),
-      checkContent('suporte', b + '/suporte', { contentType: 'text/html', marker: 'Suporte' }),
-      checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404),
-    ],
+    checks: (b) => {
+      // One healthz fetch, three derived rows (infra + self-test + event-page
+      // deep-probe) — keeps us under the 10/min healthz rate limit.
+      const health = fetchHealthz(b + '/api/healthz');
+      return [
+        health.then((h) => healthInfra('saúde · KV/D1/hash/cron', h)),
+        health.then((h) => healthSelftest('autoteste · dados/forms/Drive', h)),
+        health.then((h) => checkEventPage('página de evento (Drive + remoção)', h, b)),
+        // Headers are set by the shared html() helper on every HTML response, so we
+        // assert them against the *static* /termos page (no KV read on fotos' side)
+        // instead of the homepage, which would trigger a second events read.
+        checkHeaders('cabeçalhos de segurança', b + '/termos', [
+          'content-security-policy', 'strict-transport-security', 'x-content-type-options',
+          'x-frame-options', 'referrer-policy', 'permissions-policy',
+        ]),
+        checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' }),
+        checkJson('manifest PWA', b + '/manifest.json', (j) => {
+          if (!j || !j.name) return { detail: 'manifest sem nome' };
+          if (!Array.isArray(j.icons) || !j.icons.length || !j.icons[0].src) return { detail: 'manifest sem ícones' };
+          if (!j.start_url)   return { detail: 'manifest sem start_url' };
+          if (!j.theme_color) return { detail: 'manifest sem theme_color' };
+          return null;
+        }),
+        checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' }),
+        checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' }),
+        checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
+        checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' }),
+        checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt'),
+        checkJson('GPC opt-out', b + '/.well-known/gpc.json', (j) => (j && j.gpc === true ? null : { detail: 'gpc≠true' })),
+        checkContent('termos (LGPD)', b + '/termos', { contentType: 'text/html', marker: 'Termos de Uso' }),
+        checkContent('privacidade', b + '/privacidade', { contentType: 'text/html', marker: 'Política de Privacidade' }),
+        // The support form is gated by a Turnstile widget; if its markup is gone
+        // the form can't be submitted, so we assert the widget renders.
+        checkContent('formulário de suporte', b + '/suporte', { contentType: 'text/html', marker: 'cf-turnstile' }),
+        checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404),
+      ];
+    },
   },
   {
     name: 'Fotos — Dashboard', url: 'https://fotos.lucafchala.com/dashboard', marker: '/dashboard/login',
