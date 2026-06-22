@@ -116,12 +116,13 @@ async function checkFotosHealth(label, url) {
     if (res.status >= 500)                return { label, status: 'down', detail: `HTTP ${res.status}` };
 
     // Soft problems: collect them all, worst wins, detail lists every one.
+    // (An unconfigured admin isn't checked here — the /dashboard probe already
+    // catches it as a hard 503; keeping it out of healthz saves a KV read.)
     const issues = [];
     if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
     if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
     if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
     if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
-    if (j.adminConfigured === false)                              issues.push('admin não configurado (login impossível)');
     if (j.config && j.config.resend === false)                   issues.push('Resend ausente (e-mails desligados)');
     if (j.config && j.config.turnstile === false)                issues.push('Turnstile ausente (suporte/consent bloqueados)');
     if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
@@ -131,7 +132,6 @@ async function checkFotosHealth(label, url) {
     if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
     if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
     if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
-    if (j.removalRequests && typeof j.removalRequests.pending === 'number') bits.push(`${j.removalRequests.pending} remoções pendentes`);
     if (j.colo) bits.push(j.colo);
     return { label, status: 'up', detail: bits.join(' · ') };
   } catch (e) {
@@ -227,7 +227,10 @@ export const SERVICES = [
     name: 'Fotos', url: 'https://fotos.lucafchala.com', marker: 'fotos',
     checks: (b) => [
       checkFotosHealth('saúde · KV/D1/hash/cron', b + '/api/healthz'),
-      checkHeaders('cabeçalhos de segurança', b + '/', [
+      // Headers are set by the shared html() helper on every HTML response, so we
+      // assert them against the *static* /termos page (no KV read on fotos' side)
+      // instead of the homepage, which would trigger a second events read.
+      checkHeaders('cabeçalhos de segurança', b + '/termos', [
         'content-security-policy', 'strict-transport-security', 'x-content-type-options',
         'x-frame-options', 'referrer-policy', 'permissions-policy',
       ]),
