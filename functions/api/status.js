@@ -15,6 +15,12 @@ const DEGRADED_MS = 2500;
 // fotos hashes the login password with PBKDF2 on the request path; the deploy
 // smoke test fails the build above this, so the dashboard flags it as degraded.
 const HASH_BUDGET_MS = 200;
+// A KV read from inside the worker that takes longer than this is a warning —
+// every page render reads KV, so sustained latency here is felt site-wide.
+const KV_LATENCY_BUDGET_MS = 400;
+// RFC 9116 security.txt should never be within two weeks of its Expires — a
+// scanner would flag it, so we flag it first.
+const SECTXT_SOON_MS = 14 * 86400_000;
 
 const RANK = { up: 0, degraded: 1, down: 2 };
 function worst(a, b) { return RANK[a] >= RANK[b] ? a : b; }
@@ -88,9 +94,13 @@ async function checkJson(label, url, validate) {
   }
 }
 
-// fotos exposes a rich /api/healthz: { ok, kv, events, d1, hashMs }. Parsing it
-// lets the dashboard see *inside* the worker — KV binding, the events store,
-// the optional D1 consent log, and whether login hashing fits the CPU budget.
+// fotos exposes a deep /api/healthz: { ok, kv, events, d1, hashMs, kvLatencyMs,
+// removalRequests, cron, adminConfigured, config, colo, … }. We dissect *every*
+// field and surface each anomaly as its own line, so the dashboard and the alert
+// email can name exactly which subsystem is unhappy — KV, D1, the daily-cron
+// heartbeat, login hashing, KV latency, or a missing hardening secret. Fields
+// absent on an older healthz payload are simply skipped, so this stays correct
+// even when the two repos deploy independently (status first, fotos later).
 async function checkFotosHealth(label, url) {
   try {
     const res = await fetchSvc(url, { headers: { Accept: 'application/json' } });
@@ -98,15 +108,104 @@ async function checkFotosHealth(label, url) {
     // outage, so treat it as a pass rather than poisoning the status.
     if (res.status === 429) { res.body?.cancel(); return { label, status: 'up', detail: 'rate-limited (ignorado)' }; }
     const text = await res.text();
-    let json;
-    try { json = JSON.parse(text); } catch { return { label, status: 'down', detail: 'healthz sem JSON' }; }
-    if (json.kv === false || json.ok === false) return { label, status: 'down', detail: 'KV indisponível' };
-    if (res.status >= 500)                      return { label, status: 'down', detail: `HTTP ${res.status}` };
-    if (json.d1 === 'down')                     return { label, status: 'degraded', detail: 'D1 (consentimento) indisponível' };
-    if (typeof json.hashMs === 'number' && json.hashMs > HASH_BUDGET_MS)
-      return { label, status: 'degraded', detail: `hashing lento (${json.hashMs}ms)` };
-    const extra = typeof json.events === 'number' ? `${json.events} eventos · hash ${json.hashMs}ms` : '';
-    return { label, status: 'up', detail: extra };
+    let j;
+    try { j = JSON.parse(text); } catch { return { label, status: 'down', detail: 'healthz sem JSON' }; }
+
+    // Hard down: the one condition fotos itself reports as fatal.
+    if (j.kv === false || j.ok === false) return { label, status: 'down', detail: 'KV indisponível' };
+    if (res.status >= 500)                return { label, status: 'down', detail: `HTTP ${res.status}` };
+
+    // Soft problems: collect them all, worst wins, detail lists every one.
+    const issues = [];
+    if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
+    if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
+    if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
+    if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
+    if (j.adminConfigured === false)                              issues.push('admin não configurado (login impossível)');
+    if (j.config && j.config.resend === false)                   issues.push('Resend ausente (e-mails desligados)');
+    if (j.config && j.config.turnstile === false)                issues.push('Turnstile ausente (suporte/consent bloqueados)');
+    if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
+
+    // Healthy: pack the headline counters into the detail line.
+    const bits = [];
+    if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
+    if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
+    if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
+    if (j.removalRequests && typeof j.removalRequests.pending === 'number') bits.push(`${j.removalRequests.pending} remoções pendentes`);
+    if (j.colo) bits.push(j.colo);
+    return { label, status: 'up', detail: bits.join(' · ') };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
+// Security-header probe: confirm the response still carries the hardening headers
+// the worker sets (CSP, HSTS, nosniff, frame/embedding protection, …). A header
+// silently dropped is a real regression — degraded, naming exactly what's gone.
+async function checkHeaders(label, url, required) {
+  try {
+    const res = await fetchSvc(url);
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
+    res.body?.cancel();
+    const missing = required.filter((h) => !res.headers.get(h));
+    if (missing.length) return { label, status: 'degraded', detail: `faltando: ${missing.join(', ')}` };
+    return { label, status: 'up', detail: `${required.length} cabeçalhos ok` };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
+// Valid-XML sub-check: right content-type, the XML declaration, and a required
+// root element — proves sitemap.xml is actually a sitemap, not an error page
+// served with a 200.
+async function checkXml(label, url, { rootTag } = {}) {
+  try {
+    const res = await fetchSvc(url);
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
+    if (res.status >= 400) { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+    const ct = res.headers.get('content-type') || '';
+    const text = await res.text();
+    if (!ct.includes('xml'))                 return { label, status: 'degraded', detail: `tipo inesperado (${ct.split(';')[0] || 'desconhecido'})` };
+    if (!text.includes('<?xml'))             return { label, status: 'degraded', detail: 'declaração XML ausente' };
+    if (rootTag && !text.includes(rootTag))  return { label, status: 'degraded', detail: `elemento ${rootTag}…> ausente` };
+    return { label, status: 'up', detail: '' };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
+// RFC 9116 security.txt: must declare a Contact and an Expires still in the
+// future. An expired (or near-expired) file is a compliance regression — catch
+// it before an external scanner does.
+async function checkSecurityTxt(label, url) {
+  try {
+    const res = await fetchSvc(url);
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
+    if (res.status >= 400) { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+    const text = await res.text();
+    if (!/^Contact:/im.test(text)) return { label, status: 'degraded', detail: 'sem campo Contact' };
+    const m = text.match(/^Expires:\s*(.+)$/im);
+    if (!m) return { label, status: 'degraded', detail: 'sem campo Expires' };
+    const exp = new Date(m[1].trim()).getTime();
+    if (!Number.isFinite(exp))    return { label, status: 'degraded', detail: 'Expires inválido' };
+    const left = exp - Date.now();
+    if (left < 0)                 return { label, status: 'degraded', detail: 'expirado' };
+    if (left < SECTXT_SOON_MS)    return { label, status: 'degraded', detail: `expira em ${Math.ceil(left / 86400_000)}d` };
+    return { label, status: 'up', detail: `válido +${Math.floor(left / 86400_000)}d` };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
+// Negative probe: a path that must NOT exist should answer 404. A 200 means the
+// router/catch-all broke (a soft-404 served as 200, or every slug resolving).
+async function checkStatusCode(label, url, expected) {
+  try {
+    const res = await fetchSvc(url);
+    res.body?.cancel();
+    if (res.status === expected) return { label, status: 'up', detail: `HTTP ${res.status}` };
+    if (res.status >= 500)       return { label, status: 'down', detail: `HTTP ${res.status}` };
+    return { label, status: 'degraded', detail: `HTTP ${res.status} (esperado ${expected})` };
   } catch (e) {
     return { label, status: 'down', detail: netDetail(e) };
   }
@@ -120,13 +219,36 @@ export const SERVICES = [
     name: 'Rádio', url: 'https://radio.lucafchala.com', marker: 'Radio',
   },
   {
+    // fotos gets deliberately exhaustive coverage: every public route, every
+    // data file, the deep healthz, the security headers, the RFC 9116 contact,
+    // the PWA contract, and a negative routing probe. The service's status is
+    // the worst of all of them, and every failure is named — so nothing breaks
+    // on fotos without showing up here first.
     name: 'Fotos', url: 'https://fotos.lucafchala.com', marker: 'fotos',
     checks: (b) => [
-      checkFotosHealth('saúde · KV/D1/hash', b + '/api/healthz'),
+      checkFotosHealth('saúde · KV/D1/hash/cron', b + '/api/healthz'),
+      checkHeaders('cabeçalhos de segurança', b + '/', [
+        'content-security-policy', 'strict-transport-security', 'x-content-type-options',
+        'x-frame-options', 'referrer-policy', 'permissions-policy',
+      ]),
       checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' }),
-      checkJson('manifest PWA', b + '/manifest.json', (j) => (j && j.name ? null : { detail: 'manifest sem nome' })),
-      checkContent('termos (LGPD)', b + '/termos', { contentType: 'text/html' }),
-      checkContent('suporte', b + '/suporte', { contentType: 'text/html' }),
+      checkJson('manifest PWA', b + '/manifest.json', (j) => {
+        if (!j || !j.name) return { detail: 'manifest sem nome' };
+        if (!Array.isArray(j.icons) || !j.icons.length || !j.icons[0].src) return { detail: 'manifest sem ícones' };
+        if (!j.start_url)   return { detail: 'manifest sem start_url' };
+        if (!j.theme_color) return { detail: 'manifest sem theme_color' };
+        return null;
+      }),
+      checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' }),
+      checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' }),
+      checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
+      checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' }),
+      checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt'),
+      checkJson('GPC opt-out', b + '/.well-known/gpc.json', (j) => (j && j.gpc === true ? null : { detail: 'gpc≠true' })),
+      checkContent('termos (LGPD)', b + '/termos', { contentType: 'text/html', marker: 'Termos de Uso' }),
+      checkContent('privacidade', b + '/privacidade', { contentType: 'text/html', marker: 'Política de Privacidade' }),
+      checkContent('suporte', b + '/suporte', { contentType: 'text/html', marker: 'Suporte' }),
+      checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404),
     ],
   },
   {
@@ -220,7 +342,7 @@ async function detectAndNotify(env, services) {
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
     if (await KV.get(`notify_sent:${s.name}`)) continue;
     await KV.put(`notify_sent:${s.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
-    changes.push({ name: s.name, url: s.url, from: p, to: s.status, problem: (s.problems && s.problems[0]) || '' });
+    changes.push({ name: s.name, url: s.url, from: p, to: s.status, problems: Array.isArray(s.problems) ? s.problems : [] });
   }
   if (changes.length === 0) return;
 
@@ -236,13 +358,18 @@ async function sendAlerts(env, changes) {
 
   const deduped = [...new Set([NOTIFY_TO, ...subscribers.map(s => s.email)])];
 
-  const rows = changes.map(c =>
-    `<tr>
-      <td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px">${esc(c.name)}</td>
-      <td style="padding:6px 8px;font-family:monospace;font-size:12px">${icon(c.from)} → ${icon(c.to)}</td>
-      <td style="padding:6px 0;font-family:monospace;font-size:11px;color:#9a8f80">${esc(c.url)}${c.problem ? '<br>' + esc(c.problem) : ''}</td>
-    </tr>`
-  ).join('');
+  const rows = changes.map(c => {
+    // List every failing check, not just the first — the whole point is to know
+    // about *any* problem, so an alert spells out all of them at once.
+    const problemList = (c.problems && c.problems.length)
+      ? '<br>' + c.problems.map(p => '• ' + esc(p)).join('<br>')
+      : '';
+    return `<tr>
+      <td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px;vertical-align:top">${esc(c.name)}</td>
+      <td style="padding:6px 8px;font-family:monospace;font-size:12px;vertical-align:top">${icon(c.from)} → ${icon(c.to)}</td>
+      <td style="padding:6px 0;font-family:monospace;font-size:11px;color:#9a8f80">${esc(c.url)}${problemList}</td>
+    </tr>`;
+  }).join('');
 
   const subject = changes.length === 1
     ? `${icon(changes[0].to)} ${changes[0].name} — status.lucafchala.com`
