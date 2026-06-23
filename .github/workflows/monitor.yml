@@ -11,7 +11,8 @@ name: monitor
 # emails.
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 min (GitHub Actions' minimum cadence)
+    - cron: '*/10 * * * *'  # every 10 min — keeps KV writes low (account-wide
+                            #  free limit is 1k/day, shared with the fotos site)
   workflow_dispatch: {}     # manual sweep button in the Actions tab
 
 permissions: {}
