@@ -1,0 +1,42 @@
+name: monitor
+
+# Keeps the status sweep — and with it server-side change detection + alert
+# emails — alive even when nobody has the dashboard open. /api/status only runs
+# when index.html polls it (on load + every 60s), so without any viewers no
+# sweep happens and no alert is sent. This pings it on a schedule instead.
+#
+# Caveats: scheduled workflows run only from the default branch, and GitHub can
+# delay them a few minutes under load. The 1h-per-service alert cooldown in
+# functions/api/status.js means a delayed or extra run never produces duplicate
+# emails.
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 min (GitHub Actions' minimum cadence)
+  workflow_dispatch: {}     # manual sweep button in the Actions tab
+
+permissions: {}
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger /api/status (fresh sweep -> detectAndNotify)
+        run: |
+          set -u
+          # Cache-buster: /api/status is edge-cached 30s; a unique query key
+          # forces a fresh sweep so change detection runs on every tick.
+          url="https://status.lucafchala.com/api/status?source=gha-cron&t=${GITHUB_RUN_ID}-$(date +%s)"
+          for attempt in 1 2 3; do
+            if code=$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 30 "$url"); then
+              echo "sweep ok (HTTP $code)"
+              exit 0
+            fi
+            echo "attempt $attempt failed; retrying in 10s"
+            sleep 10
+          done
+          echo "status sweep failed after 3 attempts"
+          exit 1
