@@ -394,9 +394,21 @@ async function detectAndNotify(env, services) {
   let prev = {};
   try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; }
 
+  // Write last_status ONLY when something actually changed. KV writes are the
+  // tightest free-tier limit (1k/day, shared account-wide with the fotos site),
+  // and the sweep runs every 5 min from the cron — so an unconditional write was
+  // ~288 wasted writes/day on a value that rarely changes. Now: ~0 in steady
+  // state, a write only on a real transition.
   const next = {};
-  for (const s of services) next[s.name] = s.status;
-  await KV.put('last_status', JSON.stringify(next));
+  let changed = false;
+  for (const s of services) {
+    next[s.name] = s.status;
+    if (prev[s.name] !== s.status) changed = true;
+  }
+  if (!changed) {
+    for (const k of Object.keys(prev)) { if (!(k in next)) { changed = true; break; } } // a service was removed
+  }
+  if (changed) await KV.put('last_status', JSON.stringify(next));
 
   if (!env.RESEND_API_KEY || !env.NOTIFY_TO) return;
 
