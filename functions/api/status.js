@@ -329,6 +329,24 @@ export const SERVICES = [
       checkContent('prova de posse', b + '/proof-of-ownership.txt', { marker: 'Luca Ferriani Chala' }),
     ],
   },
+  {
+    // The dashboard monitors itself: its own /api/healthz exposes whether the
+    // STATUS_KV binding, the Resend key, and the admin recipient are present —
+    // the exact config drift that silently breaks alerting/subscriptions. (A
+    // *total* status-page outage can't self-report, since /api/status wouldn't
+    // run; the GitHub Actions monitor's non-200 is the backstop for that.)
+    name: 'Status', url: 'https://status.lucafchala.com', marker: 'monitoramento de serviços',
+    checks: (b) => [
+      checkJson('saúde · KV/Resend/notify', b + '/api/healthz', (j) => {
+        if (!j) return { detail: 'healthz inválido' };
+        const probs = [];
+        if (j.kv === false)        probs.push('STATUS_KV ausente (alertas/inscrições off)');
+        if (j.resendKey === false) probs.push('RESEND_API_KEY ausente (sem e-mail)');
+        if (j.notifyTo === false)  probs.push('NOTIFY_TO ausente (sem destinatário)');
+        return probs.length ? { detail: probs.join(' · ') } : null;
+      }),
+    ],
+  },
 ];
 
 async function checkService(svc) {
