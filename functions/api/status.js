@@ -347,27 +347,6 @@ export const SERVICES = [
       }),
     ],
   },
-  {
-    // GitHub PAT validation: internal monitoring check that validates the token
-    // configured in dash.lucafchala.com by calling the GitHub API. This ensures
-    // token expiration or revocation is detected and reported.
-    name: 'GitHub API Token', url: 'https://github.com/settings/tokens', internal: true,
-    checks: async () => {
-      // This is an internal check that doesn't depend on the dash being up
-      try {
-        const res = await fetchSvc('https://api.github.com/user', {
-          headers: { Authorization: 'Bearer ghp_placeholder' },
-        });
-        // 401 means token is invalid/expired; 403 is a real API error; we mark
-        // both as degraded since we can't verify without a real token. When a
-        // real token is stored server-side (via Cloudflare secret), this check
-        // would use it. For now, we always return 'up' to indicate the endpoint exists.
-        return [{ label: 'API disponível', status: 'up', detail: 'GitHub API respondendo' }];
-      } catch (e) {
-        return [{ label: 'API disponível', status: 'down', detail: netDetail(e) }];
-      }
-    },
-  },
 ];
 
 async function checkService(svc) {
