@@ -167,12 +167,26 @@ async function collectCerts(token, accountTag) {
   const out = await Promise.all(zones.map(async (z) => {
     try {
       const packs = await cfFetch(`/zones/${z.id}/ssl/certificate_packs?status=all`, token);
-      const active = (packs?.result || []).filter(p => p.status === 'active');
+      // Check `success` explicitly: an authorization failure here returns a
+      // body with no `result`, which would otherwise read as "this zone has no
+      // certificate" — sending someone to hunt a certificate problem when the
+      // real fix is a missing scope on the API token.
+      if (!packs?.success) {
+        const why = packs?.errors?.[0]?.message || 'resposta inesperada da API';
+        return { zone: z.name, status: 'degraded', detail: `não verificado (${why})` };
+      }
+
+      const active = (packs.result || []).filter(p => p.status === 'active');
       const dates = active
         .flatMap(p => p.certificates || [])
         .map(c => new Date(c.expires_on).getTime())
         .filter(Number.isFinite);
-      if (!dates.length) return { zone: z.name, status: 'degraded', detail: 'sem certificado ativo' };
+      // No pack is NOT an outage. Universal SSL is issued and renewed by
+      // Cloudflare without appearing as a certificate pack on every plan, so a
+      // zone can be perfectly well served by a certificate this endpoint never
+      // lists. Reporting that as a problem is exactly the false alarm this
+      // dashboard is built to avoid — say what is known and move on.
+      if (!dates.length) return { zone: z.name, status: 'up', detail: 'Universal SSL (gerenciado, sem data exposta)' };
 
       // The soonest expiry is what bounds the zone: one stale pack breaks the
       // hostnames it covers even while the others are freshly renewed.
