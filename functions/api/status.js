@@ -124,6 +124,7 @@ function healthInfra(label, h) {
   if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
   if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
   if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
+  if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok' && j.d1LatencyMs > 1000) issues.push(`D1 lento (${j.d1LatencyMs}ms)`);
   if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
   if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
 
@@ -131,6 +132,7 @@ function healthInfra(label, h) {
   if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
   if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
   if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
+  if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok') bits.push(`D1 ${j.d1LatencyMs}ms`);
   if (j.colo) bits.push(j.colo);
   return { label, status: 'up', detail: bits.join(' · ') };
 }
@@ -149,8 +151,17 @@ function healthSelftest(label, h) {
   if (Array.isArray(st.problems) && st.problems.length)
     return { label, status: 'degraded', detail: st.problems.join(' · ') };
   const bits = [];
-  if (st.drive && typeof st.drive.ok === 'number') bits.push(`Drive ok (${st.drive.ok})`);
-  bits.push('forms ok');
+  if (st.drive && typeof st.drive.ok === 'number') {
+    bits.push(`Drive ${st.drive.ok}/${st.drive.live || 0} ok`);
+  }
+  const formIssues = [];
+  if (st.forms) {
+    if (!st.forms.turnstile) formIssues.push('Turnstile');
+    if (!st.forms.resend) formIssues.push('Resend');
+    if (!st.forms.adminEmail) formIssues.push('ADMIN_EMAIL');
+  }
+  if (formIssues.length) bits.push(`forms (faltam: ${formIssues.join(', ')})`);
+  else bits.push('forms ok');
   return { label, status: 'up', detail: bits.join(' · ') };
 }
 
