@@ -444,9 +444,12 @@
     .quota-val.down { color: var(--down); opacity: 1; }
 
     /* On a phone the label, meter and value can't share one line legibly — give
-       the meter its own row rather than squeezing the label down to an ellipsis. */
+       the meter its own row rather than squeezing the label down to an ellipsis.
+       Spacing does the grouping: the meter sits tight under the label it belongs
+       to, with the gap to the next quota below it. Even vertical spacing made a
+       full-width 3px line read as a divider rule between two rows instead. */
     @media (max-width: 460px) {
-      .quota { flex-wrap: wrap; gap: 5px 10px; }
+      .quota { flex-wrap: wrap; gap: 2px 10px; padding-bottom: 7px; }
       .quota-bar { flex-basis: 100%; order: 3; }
     }
 
