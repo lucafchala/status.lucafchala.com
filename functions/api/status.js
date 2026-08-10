@@ -10,6 +10,10 @@
 // every failing check is reported in `problems` so the dashboard can show
 // exactly what broke.
 
+// The history log's shape is defined next to the endpoint that serves it, so
+// this writer and that reader can never drift apart.
+import { HISTORY_KEY, readHistory, trimHistory } from './status-history.js';
+
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
 // fotos hashes the login password with PBKDF2 on the request path; the deploy
@@ -22,8 +26,28 @@ const KV_LATENCY_BUDGET_MS = 400;
 // scanner would flag it, so we flag it first.
 const SECTXT_SOON_MS = 14 * 86400_000;
 
+// Data that stops being republished is a broken pipeline, but "old" is not by
+// itself a failure — a URL shortener can legitimately go months without a new
+// redirect. So age is reported as information and only the unambiguous breakage
+// (an empty collection, or a timestamp in the future) is flagged.
+const FRESHNESS_STALE_MS = 30 * 86400_000;
+// Resend answering slower than this means alert delivery is already at risk.
+const RESEND_BUDGET_MS = 3000;
+
 const RANK = { up: 0, degraded: 1, down: 2 };
 function worst(a, b) { return RANK[a] >= RANK[b] ? a : b; }
+
+// Alert severity. `down` and `degraded` are both "something is wrong", but they
+// don't deserve the same interruption: a slow response at 3am can wait, a dead
+// service can't. Recoveries are their own class so they never read as an alarm.
+function severityOf(from, to) {
+  if (to === 'down') return 'critico';
+  if (to === 'degraded') return 'atencao';
+  return RANK[from] > 0 ? 'recuperado' : 'info';
+}
+
+const SEVERITY_RANK = { info: 0, recuperado: 1, atencao: 2, critico: 3 };
+const SEVERITY_LABEL = { critico: 'CRÍTICO', atencao: 'ATENÇÃO', recuperado: 'RECUPERADO', info: 'INFO' };
 
 function fetchSvc(url, opts = {}) {
   return fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS), ...opts });
@@ -94,6 +118,103 @@ async function checkJson(label, url, validate) {
   }
 }
 
+function humanAge(ms) {
+  const d = Math.floor(ms / 86400_000);
+  if (d >= 1) return `${d}d`;
+  const h = Math.floor(ms / 3600_000);
+  if (h >= 1) return `${h}h`;
+  return `${Math.max(0, Math.floor(ms / 60_000))}min`;
+}
+
+// Data-freshness sub-check for the JSON the small static apps render from.
+// `Last-Modified` is preferred (it is the publish time); when the host doesn't
+// send one, the newest timestamp found inside the items stands in.
+//
+// Age by itself is NOT treated as a failure: these files legitimately sit
+// untouched for months, so a staleness threshold would only manufacture alerts.
+// What *is* flagged is unambiguous breakage — an empty collection (a build that
+// published nothing over real data) or a timestamp in the future (a clock or
+// publish bug) — while the age rides along in the detail so a pipeline that
+// quietly stopped is still visible at a glance.
+async function checkFreshness(label, url, { collection, timestampFields = ['updatedAt', 'createdAt', 'date', 'time'] } = {}) {
+  try {
+    const res = await fetchSvc(url, { headers: { Accept: 'application/json' } });
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
+    if (!res.ok)           { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+
+    const lastModHeader = res.headers.get('last-modified');
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { return { label, status: 'degraded', detail: 'JSON inválido' }; }
+
+    const items = json && collection ? json[collection] : null;
+    if (!Array.isArray(items)) return { label, status: 'degraded', detail: `coleção "${collection}" ausente` };
+    if (items.length === 0)    return { label, status: 'degraded', detail: 'coleção vazia (publicação quebrada?)' };
+
+    let updatedAt = lastModHeader ? new Date(lastModHeader).getTime() : NaN;
+    if (!Number.isFinite(updatedAt)) {
+      const stamps = items
+        .flatMap(it => (it && typeof it === 'object' ? timestampFields.map(f => it[f]) : []))
+        .map(v => new Date(v).getTime())
+        .filter(Number.isFinite);
+      updatedAt = stamps.length ? Math.max(...stamps) : NaN;
+    }
+
+    if (!Number.isFinite(updatedAt)) return { label, status: 'up', detail: `${items.length} itens · sem carimbo de data` };
+
+    const age = Date.now() - updatedAt;
+    // A minute of slack absorbs ordinary clock skew between hosts; anything
+    // beyond that is a genuinely wrong timestamp, not a rounding artifact.
+    if (age < -60_000) return { label, status: 'degraded', detail: `carimbo no futuro (${humanAge(-age)} à frente)` };
+
+    const stale = age > FRESHNESS_STALE_MS ? ' (parado?)' : '';
+    return { label, status: 'up', detail: `${items.length} itens · atualizado há ${humanAge(age)}${stale}` };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
+// Alert delivery is the one failure the dashboard cannot discover by failing:
+// if Resend rejects our key or the sender domain loses verification, every
+// outage e-mail is dropped silently while the dashboard itself stays green.
+//
+// Validating the key against the domains endpoint proves delivery works WITHOUT
+// sending anything — a real test message per sweep would burn through the 100
+// e-mails/day the free tier allows and put an alert in the inbox every ten
+// minutes, which is the opposite of what a monitor should do.
+async function checkResend(label, env) {
+  const key = env?.RESEND_API_KEY;
+  if (!key) return { label, status: 'degraded', detail: 'RESEND_API_KEY ausente (sem alertas)' };
+
+  const from = env.NOTIFY_FROM || 'status@lucafchala.com';
+  const domain = from.split('@')[1] || '';
+  const start = Date.now();
+  try {
+    const res = await fetchSvc('https://api.resend.com/domains', {
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+    });
+    const rt = Date.now() - start;
+
+    if (res.status === 401 || res.status === 403) {
+      res.body?.cancel();
+      return { label, status: 'down', detail: 'chave rejeitada (alertas não seriam entregues)' };
+    }
+    if (res.status === 429) { res.body?.cancel(); return { label, status: 'degraded', detail: 'rate-limited pela Resend' }; }
+    if (!res.ok)            { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+
+    const json = await res.json().catch(() => null);
+    const list = Array.isArray(json?.data) ? json.data : [];
+    const entry = list.find(d => d?.name === domain);
+
+    if (!entry)                      return { label, status: 'degraded', detail: `domínio ${domain} não cadastrado na Resend` };
+    if (entry.status !== 'verified') return { label, status: 'degraded', detail: `domínio ${domain} não verificado (${entry.status || 'desconhecido'})` };
+    if (rt > RESEND_BUDGET_MS)       return { label, status: 'degraded', detail: `API lenta (${rt}ms)` };
+    return { label, status: 'up', detail: `${domain} verificado · ${rt}ms` };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
 // fotos exposes a deep /api/healthz: { ok, kv, events, d1, hashMs, kvLatencyMs,
 // cron, selftest, config, colo, … }. We fetch it ONCE per sweep (it's rate-
 // limited to 10/min/IP) and derive THREE dashboard rows from that single
@@ -133,6 +254,10 @@ function healthInfra(label, h) {
   if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
   if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
   if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok') bits.push(`D1 ${j.d1LatencyMs}ms`);
+  // An unbound consent log is legitimate (fotos treats it as optional), but it
+  // must be *visible* — silently reporting nothing is how a missing binding
+  // survives a deploy unnoticed.
+  else if (j.d1 === 'absent') bits.push('D1 ausente');
   if (j.colo) bits.push(j.colo);
   return { label, status: 'up', detail: bits.join(' · ') };
 }
@@ -163,6 +288,32 @@ function healthSelftest(label, h) {
   if (formIssues.length) bits.push(`forms (faltam: ${formIssues.join(', ')})`);
   else bits.push('forms ok');
   return { label, status: 'up', detail: bits.join(' · ') };
+}
+
+// Row 3 — the deployed configuration fotos reports about itself: which optional
+// integrations are wired and which Terms version is live. Deliberately always
+// `up`: every *failure* this could describe is already owned by another row
+// (missing secrets by the self-test, a dead D1 by the infra row), so alerting on
+// it again would double-count. Its value is that the panel states the deployed
+// configuration outright, instead of leaving it to be inferred from what didn't
+// break — which is how a drifted Terms version between the two repos hides.
+function healthConfig(label, h) {
+  if (h.rateLimited) return { label, status: 'up', detail: 'rate-limited (ignorado)' };
+  if (h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
+  const j = h.json;
+  const c = j.config;
+  const bits = [];
+  if (c) {
+    const wired = [];
+    if (c.turnstile)  wired.push('Turnstile');
+    if (c.resend)     wired.push('Resend');
+    if (c.consentDb)  wired.push('D1');
+    if (c.adminEmail) wired.push('admin');
+    bits.push(wired.length ? `integrações: ${wired.join(', ')}` : 'nenhuma integração ativa');
+  }
+  if (j.termsVersion) bits.push(`termos ${j.termsVersion}`);
+  if (j.country) bits.push(j.country);
+  return { label, status: 'up', detail: bits.length ? bits.join(' · ') : 'sem config (healthz antigo)' };
 }
 
 // Row 3 — deep-probe a real event page (the healthy slug fotos nominates): the
@@ -279,6 +430,7 @@ export const SERVICES = [
       return [
         health.then((h) => healthInfra('saúde · KV/D1/hash/cron', h)),
         health.then((h) => healthSelftest('autoteste · dados/forms/Drive', h)),
+        health.then((h) => healthConfig('configuração implantada', h)),
         health.then((h) => checkEventPage('página de evento (Drive + remoção)', h, b)),
         // Headers are set by the shared html() helper on every HTML response, so we
         // assert them against the *static* /termos page (no KV read on fotos' side)
@@ -317,18 +469,21 @@ export const SERVICES = [
     name: 'Dash', url: 'https://dash.lucafchala.com', marker: 'Painel',
     checks: (b) => [
       checkJson('data.json (PURLs)', b + '/data.json', (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' })),
+      checkFreshness('atualidade dos dados', b + '/data.json', { collection: 'redirects' }),
     ],
   },
   {
     name: 'Paste', url: 'https://paste.lucafchala.com', marker: 'Paste',
     checks: (b) => [
       checkJson('pastes.json', b + '/pastes.json', (j) => (j && Array.isArray(j.pastes) ? null : { detail: 'lista de pastes inválida' })),
+      checkFreshness('atualidade dos dados', b + '/pastes.json', { collection: 'pastes' }),
     ],
   },
   {
     name: 'URL', url: 'https://url.lucafchala.com', marker: 'url.lucafchala.com',
     checks: (b) => [
       checkJson('data.json (redirects)', b + '/data.json', (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' })),
+      checkFreshness('atualidade dos dados', b + '/data.json', { collection: 'redirects' }),
     ],
   },
   {
@@ -347,22 +502,31 @@ export const SERVICES = [
     // *total* status-page outage can't self-report, since /api/status wouldn't
     // run; the GitHub Actions monitor's non-200 is the backstop for that.)
     name: 'Status', url: 'https://status.lucafchala.com', marker: 'monitoramento de serviços',
-    checks: (b) => [
+    checks: (b, env) => [
       checkJson('saúde · KV/Resend/notify', b + '/api/healthz', (j) => {
         if (!j) return { detail: 'healthz inválido' };
         const probs = [];
         if (j.kv === false)        probs.push('STATUS_KV ausente (alertas/inscrições off)');
         if (j.resendKey === false) probs.push('RESEND_API_KEY ausente (sem e-mail)');
         if (j.notifyTo === false)  probs.push('NOTIFY_TO ausente (sem destinatário)');
-        return probs.length ? { detail: probs.join(' · ') } : null;
+        if (probs.length) return { detail: probs.join(' · ') };
+        // Healthy: report the reach of an alert. Zero subscribers is a valid
+        // state (NOTIFY_TO still gets everything), so it's shown, not flagged.
+        const bits = [];
+        if (typeof j.subscribers === 'number') bits.push(`${j.subscribers} inscrito${j.subscribers === 1 ? '' : 's'}`);
+        if (j.cloudflareApi === false) bits.push('cotas não monitoradas');
+        return bits.length ? { status: 'up', detail: bits.join(' · ') } : null;
       }),
+      // Config presence (above) only proves the key *exists*; this proves it is
+      // still accepted and the sender domain is still verified.
+      checkResend('entrega de alertas (Resend)', env),
     ],
   },
 ];
 
-async function checkService(svc) {
+async function checkService(svc, env) {
   const primary = await probePrimary(svc.url, svc.marker);
-  const extra = svc.checks ? await Promise.all(svc.checks(svc.url)) : [];
+  const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env)) : [];
 
   const checks = [{ label: 'disponibilidade', status: primary.status, detail: primary.detail }, ...extra];
   let status = primary.status;
@@ -386,7 +550,7 @@ export async function onRequestGet(context) {
   const hit = await cache.match(cacheKey);
   if (hit) return hit;
 
-  const services = await Promise.all(SERVICES.map(checkService));
+  const services = await Promise.all(SERVICES.map((s) => checkService(s, context.env)));
   const res = new Response(JSON.stringify({ services, checkedAt: new Date().toISOString() }), {
     // s-maxage caches at the edge only; max-age=0 keeps browsers revalidating
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=0, s-maxage=30' },
@@ -419,19 +583,47 @@ async function detectAndNotify(env, services) {
   if (!changed) {
     for (const k of Object.keys(prev)) { if (!(k in next)) { changed = true; break; } } // a service was removed
   }
-  if (changed) await KV.put('last_status', JSON.stringify(next));
+  // Every real transition, logged. This is what lets a green dashboard still
+  // answer "was it already broken an hour ago?" — and it rides along inside the
+  // `changed` block precisely so it costs nothing in steady state. Transitions
+  // are recorded even when e-mail is unconfigured: the log is a record of what
+  // happened, not a side effect of alerting.
+  const transitions = services
+    .filter((s) => prev[s.name] && prev[s.name] !== s.status)
+    .map((s) => ({
+      name: s.name,
+      from: prev[s.name],
+      to: s.status,
+      at: new Date().toISOString(),
+      severity: severityOf(prev[s.name], s.status),
+      problems: Array.isArray(s.problems) ? s.problems.slice(0, 5) : [],
+    }));
+
+  if (changed) {
+    await KV.put('last_status', JSON.stringify(next));
+    if (transitions.length) {
+      const log = await readHistory(KV);
+      await KV.put(HISTORY_KEY, JSON.stringify(trimHistory([...transitions, ...log])))
+        .catch((e) => console.error('history write failed', e));
+    }
+  }
 
   if (!env.RESEND_API_KEY || !env.NOTIFY_TO) return;
 
+  // Severity floor, so a noisy class of change can be muted without giving up
+  // alerting entirely (ALERT_MIN_SEVERITY=atencao mutes recovery notices;
+  // =critico pages only for hard outages). Defaults to alerting on everything.
+  const floor = SEVERITY_RANK[env.ALERT_MIN_SEVERITY] ?? SEVERITY_RANK.info;
+
   const changes = [];
-  for (const s of services) {
-    const p = prev[s.name];
-    if (!p || p === s.status) continue;
+  for (const t of transitions) {
+    if (SEVERITY_RANK[t.severity] < floor) continue;
+    const s = services.find((x) => x.name === t.name);
     // KV is eventually consistent, so two colos sweeping at once can rarely
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
-    if (await KV.get(`notify_sent:${s.name}`)) continue;
-    await KV.put(`notify_sent:${s.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
-    changes.push({ name: s.name, url: s.url, from: p, to: s.status, problems: Array.isArray(s.problems) ? s.problems : [] });
+    if (await KV.get(`notify_sent:${t.name}`)) continue;
+    await KV.put(`notify_sent:${t.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+    changes.push({ ...t, url: s ? s.url : '' });
   }
   if (changes.length === 0) return;
 
@@ -447,7 +639,12 @@ async function sendAlerts(env, changes) {
 
   const deduped = [...new Set([NOTIFY_TO, ...subscribers.map(s => s.email)])];
 
-  const rows = changes.map(c => {
+  // Worst-first: when several services change at once the mail already batches
+  // them into one message, so the ordering is what decides whether the outage
+  // or the recovery is the first thing read.
+  const ordered = [...changes].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+
+  const rows = ordered.map(c => {
     // List every failing check, not just the first — the whole point is to know
     // about *any* problem, so an alert spells out all of them at once.
     const problemList = (c.problems && c.problems.length)
@@ -456,13 +653,17 @@ async function sendAlerts(env, changes) {
     return `<tr>
       <td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px;vertical-align:top">${esc(c.name)}</td>
       <td style="padding:6px 8px;font-family:monospace;font-size:12px;vertical-align:top">${icon(c.from)} → ${icon(c.to)}</td>
+      <td style="padding:6px 8px;font-family:monospace;font-size:10px;letter-spacing:0.08em;color:${severityColor(c.severity)};vertical-align:top">${SEVERITY_LABEL[c.severity] || ''}</td>
       <td style="padding:6px 0;font-family:monospace;font-size:11px;color:#9a8f80">${esc(c.url)}${problemList}</td>
     </tr>`;
   }).join('');
 
-  const subject = changes.length === 1
-    ? `${icon(changes[0].to)} ${changes[0].name} — status.lucafchala.com`
-    : `${changes.length} mudanças de status — status.lucafchala.com`;
+  // The subject carries the worst severity in the batch, so triage happens in
+  // the inbox list without opening anything.
+  const top = ordered[0];
+  const subject = ordered.length === 1
+    ? `[${SEVERITY_LABEL[top.severity]}] ${icon(top.to)} ${top.name} — status.lucafchala.com`
+    : `[${SEVERITY_LABEL[top.severity]}] ${ordered.length} mudanças de status — status.lucafchala.com`;
 
   const batch = deduped.map(email => {
     const sub = subscribers.find(s => s.email === email);
@@ -487,6 +688,13 @@ function esc(s) {
 
 function icon(s) {
   return s === 'up' ? '🟢' : s === 'degraded' ? '🟡' : '🔴';
+}
+
+function severityColor(sev) {
+  if (sev === 'critico') return '#c05050';
+  if (sev === 'atencao') return '#c08030';
+  if (sev === 'recuperado') return '#5c9c6c';
+  return '#6a6358';
 }
 
 function alertHtml(rows, unsubUrl) {

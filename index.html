@@ -356,6 +356,135 @@
     .checks-toggle:hover { color: var(--accent); }
     .checks-toggle.has-problems { color: var(--down); }
 
+    /* Recent-incident note on a service row — the context a live-only
+       dashboard can't give: "this is the same outage as an hour ago". */
+    .service-hist {
+      font-size: 9px;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      opacity: 0.75;
+      margin-top: 2px;
+      /* Same clipping contract as the name/url above it, so a long note can't
+         widen the row on a narrow screen. */
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .service-hist:empty { display: none; }
+    .service-hist.down { color: var(--down); opacity: 0.9; }
+    .service-hist.degraded { color: var(--degraded); opacity: 0.9; }
+
+    /* Shared panel shell for the quota + history sections */
+    .panel {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--ctrl-bg);
+    }
+    .panel-empty {
+      font-size: 10px;
+      color: var(--muted);
+      opacity: 0.7;
+      letter-spacing: 0.03em;
+    }
+
+    /* Free-tier quota meters */
+    .quota {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 10px;
+      line-height: 1.6;
+    }
+    .quota-label {
+      color: var(--muted);
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+      /* min-width:0 is what actually lets a flex item shrink past its text —
+         without it the row forces the page to scroll sideways on a phone. */
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .quota-bar {
+      flex: 1 1 auto;
+      min-width: 30px;
+      height: 3px;
+      border-radius: 2px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .quota-fill {
+      /* The track is blockified for free (it's a flex item); this span is not,
+         and an inline box ignores width/height — without this the meter paints
+         as an empty track no matter what the number says. */
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--up);
+      border-radius: 2px;
+      transition: width 0.7s cubic-bezier(0.16,1,0.3,1);
+    }
+    .quota-fill.degraded { background: var(--degraded); }
+    .quota-fill.down { background: var(--down); }
+    .quota-fill.unknown { background: var(--muted); opacity: 0.4; }
+    .quota-val {
+      flex: 0 0 auto;
+      color: var(--muted);
+      opacity: 0.7;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .quota-val.degraded { color: var(--degraded); opacity: 1; }
+    .quota-val.down { color: var(--down); opacity: 1; }
+
+    /* On a phone the label, meter and value can't share one line legibly — give
+       the meter its own row rather than squeezing the label down to an ellipsis. */
+    @media (max-width: 460px) {
+      .quota { flex-wrap: wrap; gap: 5px 10px; }
+      .quota-bar { flex-basis: 100%; order: 3; }
+    }
+
+    /* Transition log */
+    .hist {
+      display: flex;
+      align-items: baseline;
+      gap: 9px;
+      font-size: 10px;
+      line-height: 1.6;
+    }
+    .hist-when {
+      color: var(--muted);
+      opacity: 0.6;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      flex: 0 0 auto;
+    }
+    .hist-name {
+      color: var(--text);
+      opacity: 0.85;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .hist-to {
+      margin-left: auto;
+      padding-left: 10px;
+      white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .hist-to.up { color: var(--up); }
+    .hist-to.degraded { color: var(--degraded); }
+    .hist-to.down { color: var(--down); }
+
     /* Refresh button */
     .refresh-row {
       display: flex;
@@ -480,6 +609,18 @@
   <div class="rule section-anim-2">terceiros</div>
   <div class="services section-anim-2" id="third-party-list"></div>
 
+  <!-- Hidden until the log has something to show: an empty section is noise. -->
+  <div id="history-section" hidden>
+    <div class="rule section-anim-2">histórico · 48h</div>
+    <div class="panel section-anim-2" id="history-panel"></div>
+  </div>
+
+  <!-- Hidden unless CF_API_TOKEN/CF_ACCOUNT_ID are configured. -->
+  <div id="quota-section" hidden>
+    <div class="rule section-anim-2">cotas do plano gratuito</div>
+    <div class="panel section-anim-2" id="quota-panel"></div>
+  </div>
+
   <div class="refresh-row">
     <span class="last-checked" id="last-checked">–</span>
     <button class="act-btn" id="btn-refresh" onclick="runChecks()">↻ verificar agora</button>
@@ -562,10 +703,43 @@
     }
   }
 
+  async function fetchQuotaStats() {
+    try {
+      const res = await fetch('/api/quota-stats', { cache: 'no-store' });
+      return await res.json();
+    } catch { return null; }
+  }
+
+  async function fetchHistory() {
+    try {
+      const res = await fetch('/api/status-history', { cache: 'no-store' });
+      return await res.json();
+    } catch { return null; }
+  }
+
   function statusLabel(s) {
     if (s === 'up') return 'online';
     if (s === 'degraded') return 'lento';
     return 'offline';
+  }
+
+  function fmtNum(n) {
+    return n == null ? '—' : n.toLocaleString('pt-BR');
+  }
+
+  function fmtBytes(n) {
+    if (n == null) return '—';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (i === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
+  }
+
+  function fmtAge(ms) {
+    if (ms == null) return '';
+    const d = Math.floor(ms / 86400000); if (d >= 1) return d + 'd';
+    const h = Math.floor(ms / 3600000);  if (h >= 1) return h + 'h';
+    return Math.max(1, Math.floor(ms / 60000)) + 'min';
   }
 
   function rtLabel(rt, status) {
@@ -616,6 +790,7 @@
           <div class="service-info">
             <span class="service-name">${svc.name}</span>
             <span class="service-url">${svc.url.replace('https://', '')}</span>
+            <span class="service-hist" id="hist-${i}"></span>
           </div>
           <div class="service-meta">
             <span class="service-status-label" id="lbl-${i}">—</span>
@@ -682,6 +857,95 @@
       toggle.setAttribute('aria-expanded', 'false');
       toggle.textContent = `▸ ${checks.length} verificaç${checks.length > 1 ? 'ões' : 'ão'} ok`;
     }
+  }
+
+  // Free-tier headroom. The panel stays hidden entirely when the Cloudflare API
+  // credentials aren't configured — a row of "—" would imply the quota is fine
+  // when the truth is that nobody is watching it.
+  function renderQuotas(data) {
+    const section = document.getElementById('quota-section');
+    const panel   = document.getElementById('quota-panel');
+    if (!section || !panel) return;
+    if (!data || !data.configured) { section.hidden = true; return; }
+    section.hidden = false;
+
+    const quotas = (data.quotas || []).map(q => {
+      const fmt = q.bytes ? fmtBytes : fmtNum;
+      // A bar that renders as literally nothing reads as "no data"; floor a
+      // non-zero usage at a hairline so low-but-real consumption stays visible.
+      const width = q.pct == null ? 0 : Math.min(100, q.pct > 0 ? Math.max(q.pct, 1.5) : 0);
+      const val = q.used == null
+        ? 'sem dados'
+        : `${fmt(q.used)} / ${fmt(q.limit)}${q.pct != null ? ` · ${q.pct}%` : ''}`;
+      return `
+        <div class="quota">
+          <span class="quota-label">${esc(q.label)}</span>
+          <span class="quota-bar"><span class="quota-fill ${q.status}" style="width:${width}%"></span></span>
+          <span class="quota-val ${q.status}">${esc(val)}</span>
+        </div>`;
+    }).join('');
+
+    // Certificates aren't a quota, so they render as plain checks rather than
+    // meters — a progress bar for "expires in 60 days" would be nonsense.
+    const certs = (data.certs || []).map(c => `
+      <div class="check">
+        <span class="check-dot ${c.status}"></span>
+        <span class="check-label">TLS · ${esc(c.zone)}</span>
+        <span class="check-detail ${c.status}">${esc(c.detail)}</span>
+      </div>`).join('');
+
+    const errors = (data.errors || []).length
+      ? `<div class="panel-empty" style="color:var(--degraded)">não lido: ${esc(data.errors.join(' · '))}</div>`
+      : '';
+
+    panel.innerHTML = quotas + certs + errors +
+      (data.note ? `<div class="panel-empty" style="margin-top:6px">${esc(data.note)}</div>` : '');
+  }
+
+  // The transition log — what a live-only dashboard structurally can't show.
+  function renderHistory(data) {
+    const section = document.getElementById('history-section');
+    const panel   = document.getElementById('history-panel');
+    if (!section || !panel) return;
+
+    const entries = (data && data.entries) || [];
+    if (!entries.length) { section.hidden = true; return; }
+    section.hidden = false;
+
+    const rows = entries.slice(0, 12).map(e => {
+      const ago = fmtAge(Date.now() - new Date(e.at).getTime());
+      return `
+        <div class="hist">
+          <span class="hist-when">há ${esc(ago)}</span>
+          <span class="hist-name">${esc(e.name)}</span>
+          <span class="hist-to ${e.to}">${esc(statusLabel(e.from))} → ${esc(statusLabel(e.to))}</span>
+        </div>`;
+    }).join('');
+
+    // Flapping is the failure a 60-second dashboard hides best: a service that
+    // recovers between sweeps looks healthy at every single glance.
+    const flap = (data.flapping || []).length
+      ? `<div class="panel-empty" style="color:var(--degraded);margin-top:6px">instável: ${
+          esc(data.flapping.map(f => `${f.name} (${f.changes}×)`).join(' · '))}</div>`
+      : '';
+
+    panel.innerHTML = rows + flap;
+  }
+
+  // Per-service incident context, right under the name — this is what answers
+  // "is this new, or the same problem as an hour ago?" without a second look.
+  function applyServiceHistory(data) {
+    const svcs = (data && data.services) || {};
+    SERVICES.forEach((s, i) => {
+      const el = document.getElementById(`hist-${i}`);
+      if (!el) return;
+      const inc = svcs[s.name] && svcs[s.name].lastIncident;
+      if (!inc) { el.textContent = ''; el.className = 'service-hist'; return; }
+      el.className = `service-hist${inc.resolved ? '' : ' ' + inc.severity}`;
+      el.textContent = inc.resolved
+        ? `esteve ${statusLabel(inc.severity)} há ${fmtAge(inc.agoMs)} · durou ${fmtAge(inc.durationMs)}`
+        : `${statusLabel(inc.severity)} há ${fmtAge(inc.durationMs)}`;
+    });
   }
 
   function toggleChecks(i) {
@@ -751,10 +1015,17 @@
     const [[results]] = await Promise.all([
       fetchStatus().then(svcs => { svcs.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r)); return [svcs]; }),
       fetchThirdPartyStatus().then(svcs => svcs.forEach(r => updateThirdPartyRow(THIRD_PARTY.findIndex(s => s.name === r.name), r))),
+      fetchQuotaStats().then(renderQuotas),
     ]);
 
     updateBanner(results);
     updateLastChecked();
+
+    // Fetched after /api/status rather than alongside it: that sweep is what
+    // records a transition, so asking first would show a log one cycle stale.
+    const history = await fetchHistory();
+    renderHistory(history);
+    applyServiceHistory(history);
 
     btn.disabled = false;
     btn.textContent = '↻ verificar agora';
