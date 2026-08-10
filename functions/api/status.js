@@ -556,15 +556,72 @@ export async function onRequestGet(context) {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=0, s-maxage=30' },
   });
   context.waitUntil(cache.put(cacheKey, res.clone()));
-  context.waitUntil(detectAndNotify(context.env, services));
+  context.waitUntil(detectAndNotify(context.env, services, new URL(context.request.url).origin));
   return res;
 }
 
 const NOTIFY_COOLDOWN_S = 3600; // at most one alert per service per hour
 
-async function detectAndNotify(env, services) {
+// Free-tier headroom joins change detection, so a limit that starts running out
+// reaches the inbox instead of waiting to be spotted on the dashboard. Fetched
+// over HTTP rather than recomputed, so the endpoint's own 5-minute edge cache
+// absorbs the cost of running this on every sweep (including the 10-min cron).
+//
+// `quiesceOnRecovery` marks these as worsening-only: the daily counters reset at
+// UTC midnight, so a quota that peaked yesterday "recovers" every single night.
+// Emailing that — or logging it as an incident — would be pure clockwork noise.
+async function quotaEntries(origin) {
+  try {
+    const res = await fetchSvc(origin + '/api/quota-stats', { headers: { Accept: 'application/json' } });
+    if (!res.ok) { res.body?.cancel(); return []; }
+    const j = await res.json();
+    if (!j || j.configured === false) return [];
+
+    const entries = [];
+    for (const q of j.quotas || []) {
+      // A dataset we couldn't read is not a quota problem — quota-stats already
+      // reports it under errors[], and guessing here would invent an outage.
+      if (q.status === 'unknown') continue;
+      entries.push({
+        name: `cota · ${q.label}`,
+        status: q.status,
+        url: origin,
+        quiesceOnRecovery: true,
+        problems: q.status === 'up' ? [] : [
+          `${q.label}: ${q.pct}% usado${q.remaining != null ? ` · restam ${q.remaining.toLocaleString('pt-BR')}` : ''}${q.period === 'dia' ? ' hoje (zera à meia-noite UTC)' : ''}`,
+        ],
+      });
+    }
+    for (const c of j.certs || []) {
+      entries.push({
+        name: `TLS · ${c.zone}`,
+        status: c.status,
+        url: origin,
+        quiesceOnRecovery: true,
+        problems: c.status === 'up' ? [] : [`certificado de ${c.zone}: ${c.detail}`],
+      });
+    }
+    return entries;
+  } catch {
+    // Quota visibility failing must never take the service sweep's alerting
+    // down with it.
+    return [];
+  }
+}
+
+async function detectAndNotify(env, services, origin) {
   const KV = env.STATUS_KV;
   if (!KV) return;
+
+  // Services and quota rows run through one pipeline from here: same change
+  // detection, same severity, same per-name cooldown, same batched e-mail.
+  const tracked = [
+    ...services.map((s) => ({
+      name: s.name, status: s.status, url: s.url,
+      problems: s.problems, quiesceOnRecovery: false,
+    })),
+    ...(await quotaEntries(origin)),
+  ];
 
   let prev = {};
   try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; }
@@ -576,7 +633,7 @@ async function detectAndNotify(env, services) {
   // state, a write only on a real transition.
   const next = {};
   let changed = false;
-  for (const s of services) {
+  for (const s of tracked) {
     next[s.name] = s.status;
     if (prev[s.name] !== s.status) changed = true;
   }
@@ -588,8 +645,12 @@ async function detectAndNotify(env, services) {
   // `changed` block precisely so it costs nothing in steady state. Transitions
   // are recorded even when e-mail is unconfigured: the log is a record of what
   // happened, not a side effect of alerting.
-  const transitions = services
+  const transitions = tracked
     .filter((s) => prev[s.name] && prev[s.name] !== s.status)
+    // A quota falling back to `up` is the UTC-midnight reset, not a recovery.
+    // Its new state is still recorded below, so the next crossing alerts again —
+    // it just doesn't announce the clock.
+    .filter((s) => !(s.quiesceOnRecovery && s.status === 'up'))
     .map((s) => ({
       name: s.name,
       from: prev[s.name],
@@ -618,7 +679,7 @@ async function detectAndNotify(env, services) {
   const changes = [];
   for (const t of transitions) {
     if (SEVERITY_RANK[t.severity] < floor) continue;
-    const s = services.find((x) => x.name === t.name);
+    const s = tracked.find((x) => x.name === t.name);
     // KV is eventually consistent, so two colos sweeping at once can rarely
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
     if (await KV.get(`notify_sent:${t.name}`)) continue;
