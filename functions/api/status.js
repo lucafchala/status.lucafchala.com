@@ -675,15 +675,15 @@ async function detectAndNotify(env, services, origin) {
   // saiu de 300ms para 1800ms segue verde e é o aviso mais antecipado de que
   // algo vai quebrar. A cadência (no máximo a cada 30 min) é o que mantém isso
   // em ~48 escritas/dia em vez das 288 de uma gravação por varredura.
-  try {
-    const series = await readLatency(KV);
-    if (shouldSample(series)) {
+  if (shouldSample()) {
+    try {
+      const series = await readLatency(KV);
       const sample = buildSample(services);
       if (sample) await KV.put(LATENCY_KEY, JSON.stringify(trimLatency([sample, ...series])));
+    } catch (e) {
+      // Telemetria nunca pode derrubar a varredura que ela observa.
+      console.error('latency sample failed', e);
     }
-  } catch (e) {
-    // Telemetria nunca pode derrubar a varredura que ela observa.
-    console.error('latency sample failed', e);
   }
 
   if (!env.RESEND_API_KEY || !env.NOTIFY_TO) return;
@@ -748,7 +748,7 @@ async function sendAlerts(env, changes) {
     const unsubUrl = sub
       ? `https://status.lucafchala.com/api/unsubscribe?token=${sub.token}`
       : null;
-    return { from: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
+    return { from: NOTIFY_FROM, reply_to: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
   });
 
   await fetch('https://api.resend.com/emails/batch', {
