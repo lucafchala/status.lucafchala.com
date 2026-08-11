@@ -49,14 +49,14 @@ export async function readLatency(KV) {
   }
 }
 
-// Decide se já passou tempo suficiente desde a última amostra. Fica aqui, e não
-// no chamador, para que a regra de cadência viva ao lado do custo que ela
-// existe para conter.
-export function shouldSample(entries, now = Date.now()) {
-  if (!Array.isArray(entries) || entries.length === 0) return true;
-  const last = new Date(entries[0].at).getTime();
-  if (!Number.isFinite(last)) return true;
-  return now - last >= LATENCY_INTERVAL_MS;
+// Decide se já passou tempo suficiente desde a última amostra usando apenas
+// tempo — zero KV reads. A varredura roda a cada 5 min (288/dia); com amostras
+// a cada 30 min (48/dia), qualquer hora X do dia sempre produz amostra se
+// (X % 30min) < 5min. Fico ao lado do custo porque essa *é* a regra de cadência.
+export function shouldSample(now = Date.now()) {
+  // Que múltiplo de 30min o relógio passou? Se é o primeiro de cada período
+  // (primeiros 5 min em que a varredura roda), amostrar.
+  return (now % LATENCY_INTERVAL_MS) < 5 * 60_000;
 }
 
 // Monta a amostra a partir dos serviços da varredura. Só entra quem tem `rt`
