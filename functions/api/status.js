@@ -748,7 +748,7 @@ async function sendAlerts(env, changes) {
     const unsubUrl = sub
       ? `https://status.lucafchala.com/api/unsubscribe?token=${sub.token}`
       : null;
-    return { from: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
+    return { from: NOTIFY_FROM, reply_to: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
   });
 
   await fetch('https://api.resend.com/emails/batch', {
