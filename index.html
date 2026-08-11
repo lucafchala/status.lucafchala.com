@@ -488,6 +488,51 @@
     .hist-to.degraded { color: var(--degraded); }
     .hist-to.down { color: var(--down); }
 
+    .lat {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 10px;
+      line-height: 1.7;
+    }
+    .lat-name {
+      color: var(--text);
+      opacity: 0.85;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      flex: 0 0 34%;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* A sparkline mostra a forma da série; os percentis, os números. Uma sem a
+       outra engana: a forma sozinha não tem escala, o número sozinho não mostra
+       se o pico foi agora ou ontem. */
+    .lat-spark { flex: 0 0 auto; display: block; }
+    .lat-spark path { fill: none; stroke: var(--muted); stroke-width: 1.2; opacity: 0.75; }
+    .lat-spark path.degraded { stroke: var(--degraded); opacity: 1; }
+    .lat-spark path.down { stroke: var(--down); opacity: 1; }
+    .lat-val {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      margin-left: auto;
+      opacity: 0.8;
+    }
+    .lat-trend {
+      white-space: nowrap;
+      flex: 0 0 auto;
+      font-variant-numeric: tabular-nums;
+      opacity: 0.55;
+    }
+    .lat-trend.piorando { color: var(--degraded); opacity: 1; }
+    .lat-trend.melhorando { color: var(--up); opacity: 0.9; }
+    @media (max-width: 460px) {
+      .lat-name { flex-basis: 100%; }
+      .lat { flex-wrap: wrap; gap: 4px 8px; }
+      .lat-val { margin-left: 0; }
+    }
+
     /* Refresh button */
     .refresh-row {
       display: flex;
@@ -618,6 +663,13 @@
     <div class="panel section-anim-2" id="history-panel"></div>
   </div>
 
+  <!-- Hidden until there are samples: uma tabela de "—" sugeriria que a
+       latência está sendo observada quando ainda não há série nenhuma. -->
+  <div id="latency-section" hidden>
+    <div class="rule section-anim-2">tempo de resposta · 48h</div>
+    <div class="panel section-anim-2" id="latency-panel"></div>
+  </div>
+
   <!-- Hidden unless CF_API_TOKEN/CF_ACCOUNT_ID are configured. -->
   <div id="quota-section" hidden>
     <div class="rule section-anim-2">cotas do plano gratuito</div>
@@ -716,6 +768,13 @@
   async function fetchHistory() {
     try {
       const res = await fetch('/api/status-history', { cache: 'no-store' });
+      return await res.json();
+    } catch { return null; }
+  }
+
+  async function fetchLatency() {
+    try {
+      const res = await fetch('/api/latency-trends', { cache: 'no-store' });
       return await res.json();
     } catch { return null; }
   }
@@ -935,6 +994,76 @@
     panel.innerHTML = rows + flap;
   }
 
+  // Sparkline em SVG puro — sem dependência, no mesmo espírito do resto da
+  // página. Recebe a série em ordem cronológica (mais antigo primeiro).
+  function sparkline(series, status) {
+    const W = 56, H = 14, P = 1.5;
+    if (series.length < 2) return '';
+    const min = Math.min(...series), max = Math.max(...series);
+    // Série achatada: uma linha reta no meio é mais honesta que uma divisão por
+    // zero ou um traço colado na borda de baixo.
+    const span = max - min || 1;
+    const pts = series.map((v, i) => {
+      const x = P + (i / (series.length - 1)) * (W - P * 2);
+      const y = H - P - ((v - min) / span) * (H - P * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    return `<svg class="lat-spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true"
+      ><path class="${esc(status)}" d="M${pts.join('L')}"/></svg>`;
+  }
+
+  // Tendência de tempo de resposta. Responde o que o dashboard ao vivo não
+  // consegue: não "está lento?", mas "está ficando lento?" — que é o aviso que
+  // chega antes de o serviço sair do verde.
+  function renderLatency(data) {
+    const section = document.getElementById('latency-section');
+    const panel   = document.getElementById('latency-panel');
+    if (!section || !panel) return;
+    if (!data || !data.available || !data.samples) { section.hidden = true; return; }
+
+    const svcs = data.services || {};
+    const names = Object.keys(svcs);
+    if (!names.length) { section.hidden = true; return; }
+    section.hidden = false;
+
+    // entries vem mais novo primeiro; a sparkline lê da esquerda (antigo) para
+    // a direita (agora), então a série é invertida antes de desenhar.
+    const chrono = (data.entries || []).slice().reverse();
+
+    const rows = names
+      // Piorando primeiro: a ordem da lista é a ordem em que vale olhar.
+      .sort((a, b) => {
+        const ra = svcs[a].trend.direction === 'piorando' ? 0 : 1;
+        const rb = svcs[b].trend.direction === 'piorando' ? 0 : 1;
+        return ra - rb || svcs[b].p95 - svcs[a].p95;
+      })
+      .map(name => {
+        const v = svcs[name];
+        const series = chrono.map(e => e.rt[name]).filter(n => typeof n === 'number');
+        // Reaproveita os mesmos limiares do servidor para colorir: p95 é o que
+        // o usuário lento realmente sente, não a mediana.
+        const sev = v.p95 >= 2500 ? 'down' : v.p95 >= 1000 ? 'degraded' : 'up';
+        const t = v.trend;
+        const arrow = t.direction === 'piorando' ? '▲' : t.direction === 'melhorando' ? '▼' : '·';
+        const trendTxt = t.deltaPct == null ? '·' : `${arrow} ${Math.abs(t.deltaPct)}%`;
+        return `
+          <div class="lat">
+            <span class="lat-name">${esc(name)}</span>
+            ${sparkline(series, sev)}
+            <span class="lat-trend ${esc(t.direction)}" title="mediana recente vs. anterior">${esc(trendTxt)}</span>
+            <span class="lat-val">p50 ${v.p50}ms · p95 ${v.p95}ms</span>
+          </div>`;
+      }).join('');
+
+    const worsening = (data.worsening || []).length
+      ? `<div class="panel-empty" style="color:var(--degraded);margin-top:6px">ficando mais lento: ${
+          esc(data.worsening.map(w => `${w.name} (+${w.deltaPct}%)`).join(' · '))}</div>`
+      : '';
+
+    panel.innerHTML = rows + worsening +
+      `<div class="panel-empty" style="margin-top:6px">${data.samples} amostras · 1 a cada ${data.intervalMinutes}min</div>`;
+  }
+
   // Per-service incident context, right under the name — this is what answers
   // "is this new, or the same problem as an hour ago?" without a second look.
   function applyServiceHistory(data) {
@@ -1025,10 +1154,12 @@
     updateLastChecked();
 
     // Fetched after /api/status rather than alongside it: that sweep is what
-    // records a transition, so asking first would show a log one cycle stale.
-    const history = await fetchHistory();
+    // records a transition *and* the latency sample, so asking first would show
+    // both one cycle stale.
+    const [history, latency] = await Promise.all([fetchHistory(), fetchLatency()]);
     renderHistory(history);
     applyServiceHistory(history);
+    renderLatency(latency);
 
     btn.disabled = false;
     btn.textContent = '↻ verificar agora';
