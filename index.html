@@ -741,7 +741,9 @@
   async function fetchThirdPartyStatus() {
     try {
       const res = await fetch('/api/third-party-status', { cache: 'no-store' });
+      if (!res.ok) return THIRD_PARTY.map(s => ({ ...s, status: 'down', description: '' }));
       const json = await res.json();
+      if (!json || !Array.isArray(json.services)) return THIRD_PARTY.map(s => ({ ...s, status: 'down', description: '' }));
       return json.services; // [{ name, page, status, description }]
     } catch {
       return THIRD_PARTY.map(s => ({ ...s, status: 'down', description: '' }));
@@ -751,7 +753,9 @@
   async function fetchStatus() {
     try {
       const res = await fetch('/api/status', { cache: 'no-store' });
+      if (!res.ok) return SERVICES.map(s => ({ ...s, status: 'down', rt: 0 }));
       const json = await res.json();
+      if (!json || !Array.isArray(json.services)) return SERVICES.map(s => ({ ...s, status: 'down', rt: 0 }));
       return json.services;
     } catch {
       return SERVICES.map(s => ({ ...s, status: 'down', rt: 0 }));
