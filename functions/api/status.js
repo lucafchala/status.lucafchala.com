@@ -64,6 +64,10 @@ function netDetail(e) {
 // Primary probe: status code + latency, plus an optional content marker so a
 // 200 that returns a blank page, a parked placeholder, or a Cloudflare error
 // interstitial is caught as degraded instead of passing as "up".
+// Returns `text` alongside the verdict (not just for its own marker check) so
+// a service's `checks` can reuse the already-fetched homepage body instead of
+// re-fetching the same URL — e.g. fotos' gallery-depth check below. Undefined
+// when the body was never read (4xx/5xx short-circuit, or a network error).
 async function probePrimary(url, marker, degradedMs = DEGRADED_MS) {
   const start = Date.now();
   try {
@@ -73,10 +77,10 @@ async function probePrimary(url, marker, degradedMs = DEGRADED_MS) {
     if (code >= 500) { res.body?.cancel(); return { status: 'down', statusCode: code, rt, detail: `HTTP ${code}` }; }
     if (code >= 400) { res.body?.cancel(); return { status: 'degraded', statusCode: code, rt, detail: `HTTP ${code}` }; }
     const text = await res.text();
-    if (rt > degradedMs)                  return { status: 'degraded', statusCode: code, rt, detail: `resposta lenta (${rt}ms)` };
-    if (text.length < 200)                return { status: 'degraded', statusCode: code, rt, detail: 'resposta vazia' };
-    if (marker && !text.includes(marker)) return { status: 'degraded', statusCode: code, rt, detail: 'conteúdo esperado ausente' };
-    return { status: 'up', statusCode: code, rt, detail: '' };
+    if (rt > degradedMs)                  return { status: 'degraded', statusCode: code, rt, detail: `resposta lenta (${rt}ms)`, text };
+    if (text.length < 200)                return { status: 'degraded', statusCode: code, rt, detail: 'resposta vazia', text };
+    if (marker && !text.includes(marker)) return { status: 'degraded', statusCode: code, rt, detail: 'conteúdo esperado ausente', text };
+    return { status: 'up', statusCode: code, rt, detail: '', text };
   } catch (e) {
     return { status: 'down', statusCode: null, rt: Date.now() - start, detail: netDetail(e) };
   }
@@ -475,7 +479,7 @@ export const SERVICES = [
     // it's the most-used service, so it's held to a stricter bar, not just a
     // deeper one.
     degradedMs: FOTOS_DEGRADED_MS,
-    checks: (b) => {
+    checks: (b, env, primaryText) => {
       // One healthz fetch, three derived rows (infra + self-test + event-page
       // deep-probe) — keeps us under the 10/min healthz rate limit.
       const health = fetchHealthz(b + '/api/healthz');
@@ -492,11 +496,21 @@ export const SERVICES = [
         // (a shortened HSTS, a loosened X-Frame-Options) is caught too.
         checkSecurityHeaderValues('cabeçalhos de segurança (valores)', b + '/termos'),
         // The homepage marker above only proves the shell rendered; this proves
-        // the gallery actually painted event cards, not an empty grid. Uses
-        // data-title (unconditional on every card) rather than data-card
-        // (gallery.js omits it on the featured card, which would false-positive
-        // a healthy one-event gallery).
-        checkContent('galeria — eventos renderizam', b + '/', { contentType: 'text/html', marker: 'data-title="' }),
+        // the gallery actually painted event cards, not an empty grid. Reuses
+        // the primary probe's already-fetched body instead of a second GET to
+        // '/' — fotos is a single KV-backed Worker, so re-fetching the homepage
+        // would mean a second Workers invocation *and* a second events read for
+        // every sweep, purely to re-derive text the primary probe already has.
+        // Marker is data-title (unconditional on every card) rather than
+        // data-card (gallery.js omits it on the featured card, which would
+        // false-positive a healthy one-event gallery). If the primary probe
+        // never got a body (4xx/5xx/network error), that row already owns the
+        // failure — this one reports 'up' rather than double-counting it.
+        {
+          label: 'galeria — eventos renderizam',
+          status: primaryText == null || primaryText.includes('data-title="') ? 'up' : 'degraded',
+          detail: primaryText == null ? '—' : (primaryText.includes('data-title="') ? '' : 'grade sem cards de evento'),
+        },
         checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' }),
         checkJson('manifest PWA', b + '/manifest.json', (j) => {
           if (!j || !j.name) return { detail: 'manifest sem nome' };
@@ -616,7 +630,7 @@ export const SERVICES = [
 
 async function checkService(svc, env) {
   const primary = await probePrimary(svc.url, svc.marker, svc.degradedMs);
-  const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env)) : [];
+  const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env, primary.text)) : [];
 
   const checks = [{ label: 'disponibilidade', status: primary.status, detail: primary.detail }, ...extra];
   let status = primary.status;
