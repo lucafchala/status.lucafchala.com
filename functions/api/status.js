@@ -497,6 +497,13 @@ export const SERVICES = [
     ],
   },
   {
+    // PIN-gated (see _worker.js): the gate markup itself renders regardless of
+    // auth state, so the marker check works without a session. Nothing beyond
+    // the gate is reachable without the PIN, so there's no functional
+    // sub-check to add here the way the other apps get one.
+    name: 'RG', url: 'https://rg.lucafchala.com', marker: 'Acesso restrito',
+  },
+  {
     // The dashboard monitors itself: its own /api/healthz exposes whether the
     // STATUS_KV binding, the Resend key, and the admin recipient are present —
     // the exact config drift that silently breaks alerting/subscriptions. (A

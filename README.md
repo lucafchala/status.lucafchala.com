@@ -12,7 +12,7 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 
 **One sentence:** `status.lucafchala.com` is a static dashboard (`index.html`) backed by a handful of Cloudflare Pages Functions that health‑check the ecosystem's subdomains plus their upstream providers, and let visitors subscribe by email to outage notifications.
 
-**In a paragraph:** The browser loads a single static page that, on load and then every 60 seconds, calls `/api/status`, `/api/third-party-status`, `/api/quota-stats`, `/api/status-history` and `/api/latency-trends`. The first probes the ten first‑party sites — the nine `*.lucafchala.com` services plus the dashboard itself; the second checks the public status APIs of the providers the network relies on (GitHub, Cloudflare, Anthropic/Claude, Resend, Google); the third reports how much of the Cloudflare free tier is left; the fourth is the 48‑hour transition log, which is what lets a green dashboard still answer *"was this already broken an hour ago?"*; the fifth is the 48‑hour response‑time trend, which answers the one before that — *"is this getting slower?"* — while everything is still green. Change detection and alert email run **server-side** inside each fresh `/api/status` sweep. Visitors can subscribe (`/api/subscribe`) and unsubscribe (`/api/unsubscribe`); subscriber emails live in a Cloudflare KV namespace. This is the only repo in the network with real serverless endpoints — everything else is static or a single Worker.
+**In a paragraph:** The browser loads a single static page that, on load and then every 60 seconds, calls `/api/status`, `/api/third-party-status`, `/api/quota-stats`, `/api/status-history` and `/api/latency-trends`. The first probes the eleven first‑party sites — the ten `*.lucafchala.com` services plus the dashboard itself; the second checks the public status APIs of the providers the network relies on (GitHub, Cloudflare, Anthropic/Claude, Resend, Google); the third reports how much of the Cloudflare free tier is left; the fourth is the 48‑hour transition log, which is what lets a green dashboard still answer *"was this already broken an hour ago?"*; the fifth is the 48‑hour response‑time trend, which answers the one before that — *"is this getting slower?"* — while everything is still green. Change detection and alert email run **server-side** inside each fresh `/api/status` sweep. Visitors can subscribe (`/api/subscribe`) and unsubscribe (`/api/unsubscribe`); subscriber emails live in a Cloudflare KV namespace. This is the only repo in the network with real serverless endpoints — everything else is static or a single Worker.
 
 ---
 
@@ -67,6 +67,7 @@ All probed with GET, following redirects, 10 s timeout, polled every 60 s. Beyon
 | `url.lucafchala.com` | app renders · `/data.json` is valid JSON with a `redirects` array · **data freshness** |
 | `keys.lucafchala.com` | page renders (content marker) |
 | `proof.lucafchala.com` | page renders · `/proof-of-ownership.txt` is present and intact |
+| `rg.lucafchala.com` | page renders (content marker on the PIN gate — everything past the gate needs the PIN, so there's no deeper functional check to add) |
 | `status.lucafchala.com` *(self)* | dashboard renders · own **`/api/healthz`** parsed — flags `STATUS_KV` / `RESEND_API_KEY` / `NOTIFY_TO` missing (the config drift that silently breaks alerting + subscriptions) and reports subscriber reach · **Resend delivery** verified against the live API (key still accepted, sender domain still verified, latency within budget). A *total* outage can't self‑report — the GitHub Actions monitor's non‑200 is the backstop. |
 
 **On data freshness:** age alone is *not* treated as a failure — a URL shortener can legitimately go months without a new redirect, so a staleness threshold would only manufacture alerts. What is flagged is unambiguous breakage: an **empty collection** (a build that published nothing over real data) or a **timestamp in the future** (a clock or publish bug). The age rides along in the detail (`3 itens · atualizado há 2d`) so a pipeline that quietly stopped is still visible at a glance.
@@ -170,3 +171,14 @@ Uses the shared ecosystem design system — dark `#0d0c0a` / amber `#c08030`, **
 - [ ] subscribe button layout fix
 - [ ] latency trending (p50/p95/p99 over 24 h) — would need a rolling sample store in KV, so it's gated on write budget
 - [ ] deeper security‑header validation (parse CSP/HSTS *values*, not just presence)
+
+## External redundancy
+
+This dashboard runs on the same Cloudflare account as everything it checks, so
+it cannot see an outage that takes the whole account down (a bad deploy at the
+Cloudflare/DNS layer, Resend down, or the GitHub Actions cron silently
+failing). A free third‑party synthetic monitor, independent of this
+infrastructure, is the planned backstop — decision, provider comparison, and
+rollout status are tracked in [`fotos/TODO.md`](https://github.com/lucafchala/fotos/blob/main/TODO.md#monitoramento--prioridade-máxima)
+rather than duplicated here, since the scope is the whole ecosystem, not just
+this repo.
