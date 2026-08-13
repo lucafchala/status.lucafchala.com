@@ -497,6 +497,38 @@ export const SERVICES = [
     ],
   },
   {
+    // PIN-gated (see _worker.js): the gate markup itself renders regardless of
+    // auth state, so the marker check works without a session. Nothing beyond
+    // the gate is reachable without the PIN, so there's no functional
+    // sub-check to add here the way the other apps get one.
+    name: 'RG', url: 'https://rg.lucafchala.com', marker: 'Acesso restrito',
+  },
+  {
+    // Static, client-side-only (localStorage) — no API of its own to probe
+    // beyond the page rendering.
+    name: 'Pays', url: 'https://pays.lucafchala.com', marker: 'subs',
+  },
+  {
+    // Static single-page tool — no backend, so a content marker is the whole
+    // functional surface.
+    name: 'Treino', url: 'https://treino.lucafchala.com', marker: 'Hevy',
+  },
+  {
+    name: 'Edifício Maison Blanche', url: 'https://edificio-maison-blanche.lucafchala.com', marker: 'Maison Blanche',
+  },
+  {
+    // The static page is the front end; the real functional surface is the
+    // Worker it POSTs/GETs to. Both get checked: the page renders, and the
+    // leaderboard Worker (a separate origin, not covered by the primary probe)
+    // actually answers with the shape the front end expects.
+    name: 'Restricted', url: 'https://restricted.lucafchala.com', marker: 'restricted.lucafchala.com',
+    checks: () => [
+      checkJson('leaderboard (Worker)', 'https://ctf-leaderboard.lucafchala.workers.dev/?action=list', (j) => (
+        j && Array.isArray(j.entries) ? null : { detail: 'campo entries ausente' }
+      )),
+    ],
+  },
+  {
     // The dashboard monitors itself: its own /api/healthz exposes whether the
     // STATUS_KV binding, the Resend key, and the admin recipient are present —
     // the exact config drift that silently breaks alerting/subscriptions. (A
