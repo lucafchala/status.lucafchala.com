@@ -17,6 +17,9 @@ import { LATENCY_KEY, readLatency, trimLatency, shouldSample, buildSample } from
 
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
+// fotos is the most-used service in the suite, so its primary probe holds it
+// to a tighter latency SLA than everything else instead of sharing DEGRADED_MS.
+const FOTOS_DEGRADED_MS = 1500;
 // fotos hashes the login password with PBKDF2 on the request path; the deploy
 // smoke test fails the build above this, so the dashboard flags it as degraded.
 const HASH_BUDGET_MS = 200;
@@ -61,7 +64,7 @@ function netDetail(e) {
 // Primary probe: status code + latency, plus an optional content marker so a
 // 200 that returns a blank page, a parked placeholder, or a Cloudflare error
 // interstitial is caught as degraded instead of passing as "up".
-async function probePrimary(url, marker) {
+async function probePrimary(url, marker, degradedMs = DEGRADED_MS) {
   const start = Date.now();
   try {
     const res = await fetchSvc(url);
@@ -70,7 +73,7 @@ async function probePrimary(url, marker) {
     if (code >= 500) { res.body?.cancel(); return { status: 'down', statusCode: code, rt, detail: `HTTP ${code}` }; }
     if (code >= 400) { res.body?.cancel(); return { status: 'degraded', statusCode: code, rt, detail: `HTTP ${code}` }; }
     const text = await res.text();
-    if (rt > DEGRADED_MS)                 return { status: 'degraded', statusCode: code, rt, detail: `resposta lenta (${rt}ms)` };
+    if (rt > degradedMs)                  return { status: 'degraded', statusCode: code, rt, detail: `resposta lenta (${rt}ms)` };
     if (text.length < 200)                return { status: 'degraded', statusCode: code, rt, detail: 'resposta vazia' };
     if (marker && !text.includes(marker)) return { status: 'degraded', statusCode: code, rt, detail: 'conteúdo esperado ausente' };
     return { status: 'up', statusCode: code, rt, detail: '' };
@@ -248,6 +251,11 @@ function healthInfra(label, h) {
   if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
   if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok' && j.d1LatencyMs > 1000) issues.push(`D1 lento (${j.d1LatencyMs}ms)`);
   if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
+  // Unlike freshness elsewhere (age alone isn't a failure), a photography
+  // business's gallery legitimately hitting zero events is as unambiguous a
+  // breakage signal as an empty data.json is for the static sites — it means
+  // either total data loss or a KV binding pointed at the wrong namespace.
+  if (j.events === 0)                                           issues.push('0 eventos (perda de dados?)');
   if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
 
   const bits = [];
@@ -329,8 +337,12 @@ async function checkEventPage(label, h, base) {
     if (res.status >= 400) { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status} em /${slug}` }; }
     const text = await res.text();
     const missing = [];
-    if (!text.includes('drive-turnstile')) missing.push('gate do Drive');
-    if (!text.includes('rem-turnstile'))   missing.push('form de remoção');
+    if (!text.includes('drive-turnstile'))      missing.push('gate do Drive');
+    if (!text.includes('rem-turnstile'))        missing.push('form de remoção');
+    // og:title is unconditional in event.js (og:image isn't, it depends on the
+    // event having a cover) — its absence means the share-preview template
+    // itself broke, which WhatsApp/Instagram link previews depend on silently.
+    if (!text.includes('property="og:title"'))  missing.push('preview og:title');
     if (missing.length) return { label, status: 'degraded', detail: `/${slug}: faltando ${missing.join(' + ')}` };
     return { label, status: 'up', detail: `/${slug} ok` };
   } catch (e) {
@@ -338,17 +350,52 @@ async function checkEventPage(label, h, base) {
   }
 }
 
-// Security-header probe: confirm the response still carries the hardening headers
-// the worker sets (CSP, HSTS, nosniff, frame/embedding protection, …). A header
-// silently dropped is a real regression — degraded, naming exactly what's gone.
-async function checkHeaders(label, url, required) {
+// Security-header probe, VALUE-level (not just presence): checked against the
+// literal values the worker sets in html() (src/index.js) — so a header that's
+// still present but silently weakened (a shortened HSTS max-age, an X-Frame-
+// Options loosened from DENY, a CSP directive dropped) is caught, which a
+// presence-only check structurally can't. This is fotos-specific by design:
+// it's the one service that gets this depth, proportional to being the
+// highest-priority site in the suite. If the deployed policy in src/index.js
+// changes on purpose, this check needs updating alongside it.
+const HSTS_MIN_MAX_AGE = 15552000; // 180d floor; the deployed value is 1y, but a
+                                    // shorter (still reasonable) value shouldn't page.
+async function checkSecurityHeaderValues(label, url) {
   try {
     const res = await fetchSvc(url);
     if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
     res.body?.cancel();
-    const missing = required.filter((h) => !res.headers.get(h));
-    if (missing.length) return { label, status: 'degraded', detail: `faltando: ${missing.join(', ')}` };
-    return { label, status: 'up', detail: `${required.length} cabeçalhos ok` };
+    const h = (name) => res.headers.get(name) || '';
+    const issues = [];
+
+    if (h('x-content-type-options') !== 'nosniff')                        issues.push('X-Content-Type-Options');
+    if (h('x-frame-options') !== 'DENY')                                  issues.push('X-Frame-Options');
+    if (h('referrer-policy') !== 'strict-origin-when-cross-origin')       issues.push('Referrer-Policy');
+    if (h('cross-origin-opener-policy') !== 'same-origin')                issues.push('Cross-Origin-Opener-Policy');
+    if (h('cross-origin-resource-policy') !== 'same-site')                issues.push('Cross-Origin-Resource-Policy');
+
+    const hsts = h('strict-transport-security');
+    const hstsAge = Number((hsts.match(/max-age=(\d+)/) || [])[1]);
+    if (!hsts)                                                    issues.push('Strict-Transport-Security ausente');
+    else if (!Number.isFinite(hstsAge) || hstsAge < HSTS_MIN_MAX_AGE) issues.push(`HSTS max-age fraco (${hsts})`);
+    else if (!/includeSubDomains/i.test(hsts))                      issues.push('HSTS sem includeSubDomains');
+
+    const perms = h('permissions-policy');
+    for (const directive of ['camera=()', 'microphone=()', 'geolocation=()']) {
+      if (!perms.includes(directive)) issues.push(`Permissions-Policy sem ${directive}`);
+    }
+
+    const csp = h('content-security-policy');
+    if (!csp) {
+      issues.push('Content-Security-Policy ausente');
+    } else {
+      for (const directive of ["default-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", 'upgrade-insecure-requests']) {
+        if (!csp.includes(directive)) issues.push(`CSP sem "${directive}"`);
+      }
+    }
+
+    if (issues.length) return { label, status: 'degraded', detail: issues.join(' · ') };
+    return { label, status: 'up', detail: 'CSP/HSTS/9 cabeçalhos com valores íntegros' };
   } catch (e) {
     return { label, status: 'down', detail: netDetail(e) };
   }
@@ -424,6 +471,10 @@ export const SERVICES = [
     // the worst of all of them, and every failure is named — so nothing breaks
     // on fotos without showing up here first.
     name: 'Fotos', url: 'https://fotos.lucafchala.com', marker: 'fotos',
+    // Tighter latency SLA than the rest of the suite (see FOTOS_DEGRADED_MS) —
+    // it's the most-used service, so it's held to a stricter bar, not just a
+    // deeper one.
+    degradedMs: FOTOS_DEGRADED_MS,
     checks: (b) => {
       // One healthz fetch, three derived rows (infra + self-test + event-page
       // deep-probe) — keeps us under the 10/min healthz rate limit.
@@ -432,14 +483,20 @@ export const SERVICES = [
         health.then((h) => healthInfra('saúde · KV/D1/hash/cron', h)),
         health.then((h) => healthSelftest('autoteste · dados/forms/Drive', h)),
         health.then((h) => healthConfig('configuração implantada', h)),
-        health.then((h) => checkEventPage('página de evento (Drive + remoção)', h, b)),
+        health.then((h) => checkEventPage('página de evento (Drive + remoção + preview)', h, b)),
         // Headers are set by the shared html() helper on every HTML response, so we
         // assert them against the *static* /termos page (no KV read on fotos' side)
         // instead of the homepage, which would trigger a second events read.
-        checkHeaders('cabeçalhos de segurança', b + '/termos', [
-          'content-security-policy', 'strict-transport-security', 'x-content-type-options',
-          'x-frame-options', 'referrer-policy', 'permissions-policy',
-        ]),
+        // Value-level, not presence-only: parsed against the literal policy
+        // deployed in html() (src/index.js), so a weakened-but-present header
+        // (a shortened HSTS, a loosened X-Frame-Options) is caught too.
+        checkSecurityHeaderValues('cabeçalhos de segurança (valores)', b + '/termos'),
+        // The homepage marker above only proves the shell rendered; this proves
+        // the gallery actually painted event cards, not an empty grid. Uses
+        // data-title (unconditional on every card) rather than data-card
+        // (gallery.js omits it on the featured card, which would false-positive
+        // a healthy one-event gallery).
+        checkContent('galeria — eventos renderizam', b + '/', { contentType: 'text/html', marker: 'data-title="' }),
         checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' }),
         checkJson('manifest PWA', b + '/manifest.json', (j) => {
           if (!j || !j.name) return { detail: 'manifest sem nome' };
@@ -558,7 +615,7 @@ export const SERVICES = [
 ];
 
 async function checkService(svc, env) {
-  const primary = await probePrimary(svc.url, svc.marker);
+  const primary = await probePrimary(svc.url, svc.marker, svc.degradedMs);
   const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env)) : [];
 
   const checks = [{ label: 'disponibilidade', status: primary.status, detail: primary.detail }, ...extra];
