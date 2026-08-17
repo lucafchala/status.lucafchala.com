@@ -360,10 +360,52 @@ async function checkEventPage(label, h, base) {
 // Options loosened from DENY, a CSP directive dropped) is caught, which a
 // presence-only check structurally can't. This is fotos-specific by design:
 // it's the one service that gets this depth, proportional to being the
-// highest-priority site in the suite. If the deployed policy in src/index.js
-// changes on purpose, this check needs updating alongside it.
+// highest-priority site in the suite.
+//
+// The CSP part compares each directive's VALUE against a set of acceptable
+// values (see CSP_AT_LEAST_AS_STRICT), so tightening the deployed policy does
+// NOT require touching this file — only a change that moves outside the
+// acceptable set does.
 const HSTS_MIN_MAX_AGE = 15552000; // 180d floor; the deployed value is 1y, but a
                                     // shorter (still reasonable) value shouldn't page.
+
+// Directives where a *stricter* value than the expected one is legitimate, and
+// must not be reported as a problem.
+//
+// This check exists to catch weakening. Matching a directive by literal string
+// makes it also catch STRENGTHENING, which is the opposite of the job: fotos
+// tightened `base-uri` from 'self' to 'none' (no page uses <base>, so forbidding
+// the element outright beats allowing a same-origin one) and the panel started
+// reporting `CSP sem "base-uri 'self'"` — pushing towards undoing a real
+// hardening to silence a monitor. A check that punishes the improvement it is
+// meant to protect is worse than no check.
+//
+// So: compare the directive's VALUE against the set of values that are at least
+// as strict as what we expect. 'none' is stricter than 'self' for all three
+// below; anything else (a host list, `*`, missing) still fails.
+const CSP_AT_LEAST_AS_STRICT = {
+  'default-src': ["'self'", "'none'"],
+  'base-uri': ["'none'", "'self'"],
+  'form-action': ["'none'", "'self'"],
+  'frame-ancestors': ["'none'"], // already the strictest possible
+};
+
+function cspDirectiveIssue(csp, name) {
+  // `;`-separated, and the directive name must match whole — otherwise
+  // `script-src` would satisfy a lookup for `src`.
+  const found = csp.split(';')
+    .map(part => part.trim())
+    .find(part => part === name || part.startsWith(name + ' '));
+
+  if (!found) return `CSP sem "${name}"`;
+
+  const value = found.slice(name.length).trim();
+  const permitido = CSP_AT_LEAST_AS_STRICT[name];
+  if (permitido && !permitido.includes(value)) {
+    return `CSP "${name}" fraco ("${value}", esperado ${permitido.join(' ou ')})`;
+  }
+  return null;
+}
 async function checkSecurityHeaderValues(label, url) {
   try {
     const res = await fetchSvc(url);
@@ -393,8 +435,13 @@ async function checkSecurityHeaderValues(label, url) {
     if (!csp) {
       issues.push('Content-Security-Policy ausente');
     } else {
-      for (const directive of ["default-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", 'upgrade-insecure-requests']) {
-        if (!csp.includes(directive)) issues.push(`CSP sem "${directive}"`);
+      for (const name of ['default-src', 'frame-ancestors', 'base-uri', 'form-action']) {
+        const problema = cspDirectiveIssue(csp, name);
+        if (problema) issues.push(problema);
+      }
+      // Sem valor: presença basta.
+      if (!csp.split(';').map(p => p.trim()).includes('upgrade-insecure-requests')) {
+        issues.push('CSP sem "upgrade-insecure-requests"');
       }
     }
 
