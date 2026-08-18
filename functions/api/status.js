@@ -20,9 +20,6 @@ const DEGRADED_MS = 2500;
 // fotos is the most-used service in the suite, so its primary probe holds it
 // to a tighter latency SLA than everything else instead of sharing DEGRADED_MS.
 const FOTOS_DEGRADED_MS = 1500;
-// fotos hashes the login password with PBKDF2 on the request path; the deploy
-// smoke test fails the build above this, so the dashboard flags it as degraded.
-const HASH_BUDGET_MS = 200;
 // A KV read from inside the worker that takes longer than this is a warning —
 // every page render reads KV, so sustained latency here is felt site-wide.
 const KV_LATENCY_BUDGET_MS = 400;
@@ -223,7 +220,7 @@ async function checkResend(label, env) {
   }
 }
 
-// fotos exposes a deep /api/healthz: { ok, kv, events, d1, hashMs, kvLatencyMs,
+// fotos exposes a deep /api/healthz: { ok, kv, events, d1, kvLatencyMs,
 // cron, selftest, config, colo, … }. We fetch it ONCE per sweep (it's rate-
 // limited to 10/min/IP) and derive THREE dashboard rows from that single
 // response: infra health, the functional self-test, and a deep-probe of a real
@@ -251,7 +248,6 @@ function healthInfra(label, h) {
 
   const issues = [];
   if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
-  if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
   if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
   if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok' && j.d1LatencyMs > 1000) issues.push(`D1 lento (${j.d1LatencyMs}ms)`);
   if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
@@ -264,7 +260,6 @@ function healthInfra(label, h) {
 
   const bits = [];
   if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
-  if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
   if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
   if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok') bits.push(`D1 ${j.d1LatencyMs}ms`);
   // An unbound consent log is legitimate (fotos treats it as optional), but it
