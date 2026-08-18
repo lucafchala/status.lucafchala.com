@@ -20,9 +20,6 @@ const DEGRADED_MS = 2500;
 // fotos is the most-used service in the suite, so its primary probe holds it
 // to a tighter latency SLA than everything else instead of sharing DEGRADED_MS.
 const FOTOS_DEGRADED_MS = 1500;
-// fotos hashes the login password with PBKDF2 on the request path; the deploy
-// smoke test fails the build above this, so the dashboard flags it as degraded.
-const HASH_BUDGET_MS = 200;
 // A KV read from inside the worker that takes longer than this is a warning —
 // every page render reads KV, so sustained latency here is felt site-wide.
 const KV_LATENCY_BUDGET_MS = 400;
@@ -223,7 +220,7 @@ async function checkResend(label, env) {
   }
 }
 
-// fotos exposes a deep /api/healthz: { ok, kv, events, d1, hashMs, kvLatencyMs,
+// fotos exposes a deep /api/healthz: { ok, kv, events, d1, kvLatencyMs,
 // cron, selftest, config, colo, … }. We fetch it ONCE per sweep (it's rate-
 // limited to 10/min/IP) and derive THREE dashboard rows from that single
 // response: infra health, the functional self-test, and a deep-probe of a real
@@ -251,7 +248,6 @@ function healthInfra(label, h) {
 
   const issues = [];
   if (j.d1 === 'down')                                          issues.push('D1 (consentimento) indisponível');
-  if (typeof j.hashMs === 'number' && j.hashMs > HASH_BUDGET_MS) issues.push(`hashing lento (${j.hashMs}ms)`);
   if (typeof j.kvLatencyMs === 'number' && j.kvLatencyMs > KV_LATENCY_BUDGET_MS) issues.push(`KV lento (${j.kvLatencyMs}ms)`);
   if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok' && j.d1LatencyMs > 1000) issues.push(`D1 lento (${j.d1LatencyMs}ms)`);
   if (j.cron && j.cron.stale === true)                          issues.push(`cron parado (${j.cron.ageHours}h sem rodar)`);
@@ -264,7 +260,6 @@ function healthInfra(label, h) {
 
   const bits = [];
   if (typeof j.events === 'number') bits.push(`${j.events} eventos`);
-  if (typeof j.hashMs === 'number') bits.push(`hash ${j.hashMs}ms`);
   if (typeof j.kvLatencyMs === 'number') bits.push(`KV ${j.kvLatencyMs}ms`);
   if (typeof j.d1LatencyMs === 'number' && j.d1 === 'ok') bits.push(`D1 ${j.d1LatencyMs}ms`);
   // An unbound consent log is legitimate (fotos treats it as optional), but it
@@ -713,6 +708,28 @@ export async function onRequestGet(context) {
 
 const NOTIFY_COOLDOWN_S = 3600; // at most one alert per service per hour
 
+// Espelho em memória para quando o KV RECUSA escrita — que é exatamente o
+// cenário sobre o qual este alerta precisa avisar. A cota de escrita do plano
+// gratuito (1000/dia, conta inteira) é o limite mais apertado que existe aqui;
+// quando ela acaba, o `put` passa a lançar exceção e as duas gravações desta
+// função — `last_status` e `notify_sent` — derrubavam a varredura ANTES de
+// chegar ao envio do e-mail. Ou seja: o alarme de "estourei os limites" ficava
+// desligado justamente por ter estourado os limites. Sem barulho nenhum.
+//
+// Guardar em memória do isolate custa zero (persistir exigiria a escrita que
+// acabou de ser recusada) e resolve as duas metades:
+//
+//   • `lastStatus` impede o isolate de redetectar a MESMA transição a cada
+//     varredura — sem isso, com o KV velho preso no valor antigo, o alerta
+//     dispararia de novo a cada ciclo;
+//   • `notifiedAt` substitui o cooldown que não pôde ser gravado, mantendo o
+//     teto de um e-mail por serviço por hora.
+//
+// Vale só para este isolate, como todo estado de módulo. Se a Cloudflare rodar
+// a varredura em outro, ele pode mandar mais um e-mail — o que é o lado certo
+// de errar: repetir um aviso é barato, engolir o único aviso não é.
+const _fallback = { lastStatus: null, notifiedAt: new Map() };
+
 // Free-tier headroom joins change detection, so a limit that starts running out
 // reaches the inbox instead of waiting to be spotted on the dashboard. Fetched
 // over HTTP rather than recomputed, so the endpoint's own 5-minute edge cache
@@ -760,7 +777,7 @@ async function quotaEntries(origin) {
   }
 }
 
-async function detectAndNotify(env, services, origin) {
+export async function detectAndNotify(env, services, origin) {
   const KV = env.STATUS_KV;
   if (!KV) return;
 
@@ -776,6 +793,9 @@ async function detectAndNotify(env, services, origin) {
 
   let prev = {};
   try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; }
+  // Só existe depois de uma gravação recusada, e nesse caso o KV está velho de
+  // propósito: quem sabe o estado mais recente é o espelho.
+  if (_fallback.lastStatus) prev = { ...prev, ..._fallback.lastStatus };
 
   // Write last_status ONLY when something actually changed. KV writes are the
   // tightest free-tier limit (1k/day, shared account-wide with the fotos site),
@@ -812,7 +832,15 @@ async function detectAndNotify(env, services, origin) {
     }));
 
   if (changed) {
-    await KV.put('last_status', JSON.stringify(next));
+    try {
+      await KV.put('last_status', JSON.stringify(next));
+      // O KV voltou a aceitar escrita: o espelho cumpriu o papel e sai de cena,
+      // senão ele mascararia transições futuras com um estado congelado.
+      _fallback.lastStatus = null;
+    } catch (e) {
+      _fallback.lastStatus = next;
+      console.error('last_status write failed (cota de KV?)', e);
+    }
     if (transitions.length) {
       const log = await readHistory(KV);
       await KV.put(HISTORY_KEY, JSON.stringify(trimHistory([...transitions, ...log])))
@@ -844,13 +872,30 @@ async function detectAndNotify(env, services, origin) {
   const floor = SEVERITY_RANK[env.ALERT_MIN_SEVERITY] ?? SEVERITY_RANK.info;
 
   const changes = [];
+  const now = Date.now();
   for (const t of transitions) {
     if (SEVERITY_RANK[t.severity] < floor) continue;
     const s = tracked.find((x) => x.name === t.name);
     // KV is eventually consistent, so two colos sweeping at once can rarely
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
-    if (await KV.get(`notify_sent:${t.name}`)) continue;
-    await KV.put(`notify_sent:${t.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+    let onCooldown = false;
+    try { onCooldown = !!(await KV.get(`notify_sent:${t.name}`)); } catch { onCooldown = false; }
+    // Cooldown que não pôde ser GRAVADO não protege nada: sem este segundo
+    // olhar, uma cota estourada faria a mesma transição render e-mail a cada
+    // varredura (a cada 10 min pelo cron, a cada 60 s com o painel aberto).
+    if (!onCooldown) {
+      const last = _fallback.notifiedAt.get(t.name);
+      if (last && now - last < NOTIFY_COOLDOWN_S * 1000) onCooldown = true;
+    }
+    if (onCooldown) continue;
+    try {
+      await KV.put(`notify_sent:${t.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+    } catch (e) {
+      console.error('notify cooldown write failed (cota de KV?)', e);
+    }
+    // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto quando
+    // a gravação falhou.
+    _fallback.notifiedAt.set(t.name, now);
     changes.push({ ...t, url: s ? s.url : '' });
   }
   if (changes.length === 0) return;
