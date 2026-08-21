@@ -668,6 +668,16 @@ export const SERVICES = [
       checkResend('entrega de alertas (Resend)', env),
     ],
   },
+  {
+    name: 'Homelab', url: 'https://homelab.lucafchala.com', marker: 'status',
+    checks: () => [
+      // Check if Cloudflare is showing an error page instead of the real page.
+      // Homelab is behind a Tunnel, so connectivity issues appear as CF errors.
+      checkContent('sem erro do Cloudflare', 'https://homelab.lucafchala.com', {
+        marker: 'status' // Must have "status" to prove page loaded, not CF error
+      }),
+    ],
+  },
 ];
 
 async function checkService(svc, env) {
