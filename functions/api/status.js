@@ -670,11 +670,13 @@ export const SERVICES = [
   },
   {
     name: 'Homelab', url: 'https://homelab.lucafchala.com', marker: 'status',
-    checks: () => [
-      // Check if Cloudflare is showing an error page instead of the real page.
-      // Homelab is behind a Tunnel, so connectivity issues appear as CF errors.
-      checkContent('sem erro do Cloudflare', 'https://homelab.lucafchala.com', {
-        marker: 'status' // Must have "status" to prove page loaded, not CF error
+    checks: (b) => [
+      // Verify Cloudflare Tunnel is active by checking Kuma dashboard loads.
+      // Primary probe validates the "status" marker; this confirms the page
+      // structure (no CF error interstitial masking as a successful response).
+      checkContent('Tunnel ativo (sem erro CF)', b + '/status', {
+        contentType: 'text/html',
+        marker: 'uptime' // Kuma's dashboard has this string
       }),
     ],
   },
