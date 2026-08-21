@@ -12,7 +12,7 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 
 **One sentence:** `status.lucafchala.com` is a static dashboard (`index.html`) backed by a handful of Cloudflare Pages Functions that health‑check the ecosystem's subdomains plus their upstream providers, and let visitors subscribe by email to outage notifications.
 
-**In a paragraph:** The browser loads a single static page that, on load and then every 60 seconds, calls `/api/status`, `/api/third-party-status`, `/api/quota-stats`, `/api/status-history` and `/api/latency-trends`. The first probes fifteen first‑party sites — the fourteen `*.lucafchala.com` services plus the dashboard itself; the second checks the public status APIs of the providers the network relies on (GitHub, Cloudflare, Anthropic/Claude, Resend, Google); the third reports how much of the Cloudflare free tier is left; the fourth is the 48‑hour transition log, which is what lets a green dashboard still answer *"was this already broken an hour ago?"*; the fifth is the 48‑hour response‑time trend, which answers the one before that — *"is this getting slower?"* — while everything is still green. Change detection and alert email run **server-side** inside each fresh `/api/status` sweep. Visitors can subscribe (`/api/subscribe`) and unsubscribe (`/api/unsubscribe`); subscriber emails live in a Cloudflare KV namespace. This is the only repo in the network with real serverless endpoints — everything else is static or a single Worker.
+**In a paragraph:** The browser loads a single static page that, on load and then every 60 seconds, calls `/api/status`, `/api/third-party-status`, `/api/quota-stats`, `/api/status-history` and `/api/latency-trends`. The first probes sixteen first‑party services — the fourteen `*.lucafchala.com` services, the dashboard itself, and `homelab.lucafchala.com` (which runs Uptime Kuma via Cloudflare Tunnel); the second checks the public status APIs of the providers the network relies on (GitHub, Cloudflare, Anthropic/Claude, Resend, Google); the third reports how much of the Cloudflare free tier is left; the fourth is the 48‑hour transition log, which is what lets a green dashboard still answer *"was this already broken an hour ago?"*; the fifth is the 48‑hour response‑time trend, which answers the one before that — *"is this getting slower?"* — while everything is still green. Change detection and alert email run **server-side** inside each fresh `/api/status` sweep. Visitors can subscribe (`/api/subscribe`) and unsubscribe (`/api/unsubscribe`); subscriber emails live in a Cloudflare KV namespace. This is the only repo in the network with real serverless endpoints — everything else is static or a single Worker.
 
 ---
 
@@ -43,7 +43,7 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 
 | Route | Method | Behavior | Needs |
 |---|---|---|---|
-| `/api/status` | GET | **Functional** health‑checks of the 10 first‑party sites in parallel (GET, 10 s timeout). Each service has a primary availability probe (status code + latency + a content marker proving the right page rendered) plus optional sub‑checks — running server‑side means it can read response bodies cross‑origin, which the browser can't. Returns `{ services: [{ name, url, status, statusCode, rt, checks, problems }], checkedAt }`, where `checks` is `[{ label, status, detail }]` and `problems` is a list of human‑readable failures. A service's status is the **worst** of all its checks. **Base rules:** HTTP ≥ 500 → `down`; 400–499, slow (`rt` > 2500 ms), unexpected/empty content, missing data files, or a failing `/api/healthz` → `degraded`/`down`. Edge-cached 30 s. On fresh sweeps, also runs server-side change detection + alert emails (which list **every** failing check for a changed service, not just the first). | (emails need `RESEND_API_KEY`, `NOTIFY_TO`, `STATUS_KV`) |
+| `/api/status` | GET | **Functional** health‑checks of the 16 first‑party services in parallel (GET, 10 s timeout). Each service has a primary availability probe (status code + latency + a content marker proving the right page rendered) plus optional sub‑checks — running server‑side means it can read response bodies cross‑origin, which the browser can't. Returns `{ services: [{ name, url, status, statusCode, rt, checks, problems }], checkedAt }`, where `checks` is `[{ label, status, detail }]` and `problems` is a list of human‑readable failures. A service's status is the **worst** of all its checks. **Base rules:** HTTP ≥ 500 → `down`; 400–499, slow (`rt` > 2500 ms), unexpected/empty content, missing data files, or a failing `/api/healthz` → `degraded`/`down`. Edge-cached 30 s. On fresh sweeps, also runs server-side change detection + alert emails (which list **every** failing check for a changed service, not just the first). | (emails need `RESEND_API_KEY`, `NOTIFY_TO`, `STATUS_KV`) |
 | `/api/third-party-status` | GET | Checks provider status pages (GitHub, Cloudflare, Anthropic, Resend, Google Cloud), 8 s timeout, with provider‑specific parsing (e.g. Cloudflare filtered to Brazil PoPs). Edge-cached 30 s. | — |
 | `/api/subscribe` | POST | Adds an email to KV (with a UUID token), sends a welcome email via Resend. Returns `{ ok, already }`. | `RESEND_API_KEY`, `NOTIFY_TO`, `NOTIFY_FROM`, `STATUS_KV` |
 | `/api/unsubscribe?token=…` | GET | Removes the subscriber matching `token`, returns a small HTML confirmation page. | `STATUS_KV` |
@@ -72,6 +72,7 @@ All probed with GET, following redirects, 10 s timeout, polled every 60 s. Beyon
 | `treino.lucafchala.com` | page renders (content marker) — static single‑page tool, no backend |
 | `edificio-maison-blanche.lucafchala.com` | page renders (content marker) |
 | `restricted.lucafchala.com` | page renders (content marker) · the CTF's leaderboard **Worker** (`ctf-leaderboard.lucafchala.workers.dev`, a separate origin from the static page) answers `?action=list` with an `entries` array |
+| `homelab.lucafchala.com` | page renders (content marker `status`) — **Uptime Kuma** running behind Cloudflare Tunnel. Fotos sends a heartbeat push to Kuma with every request; this check verifies Kuma is accessible and the tunnel is alive. Kuma independently monitors fotos and other homelab services. |
 | `status.lucafchala.com` *(self)* | dashboard renders · own **`/api/healthz`** parsed — flags `STATUS_KV` / `RESEND_API_KEY` / `NOTIFY_TO` missing (the config drift that silently breaks alerting + subscriptions) and reports subscriber reach · **Resend delivery** verified against the live API (key still accepted, sender domain still verified, latency within budget). A *total* outage can't self‑report — the GitHub Actions monitor's non‑200 is the backstop. |
 
 **On data freshness:** age alone is *not* treated as a failure — a URL shortener can legitimately go months without a new redirect, so a staleness threshold would only manufacture alerts. What is flagged is unambiguous breakage: an **empty collection** (a build that published nothing over real data) or a **timestamp in the future** (a clock or publish bug). The age rides along in the detail (`3 itens · atualizado há 2d`) so a pipeline that quietly stopped is still visible at a glance.
@@ -146,7 +147,7 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
 ├── favicon.svg                      # Status icon (green up-dot on dark bg)
 └── functions/
     └── api/
-        ├── status.js                # GET  /api/status              — checks 10 first-party sites (incl. the dashboard itself)
+        ├── status.js                # GET  /api/status              — checks 16 first-party services (incl. dashboard + homelab)
         ├── status-history.js        # GET  /api/status-history      — 48h transition log; also owns the log's shape for the writer in status.js
         ├── quota-stats.js           # GET  /api/quota-stats         — Cloudflare free-tier headroom + TLS expiry
         ├── latency-trends.js        # GET  /api/latency-trends      — 48h response-time percentiles + trend; owns the series' shape for the writer in status.js
@@ -155,6 +156,27 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
         ├── unsubscribe.js           # GET  /api/unsubscribe?token=…  — remove subscriber
         └── healthz.js               # GET  /api/healthz             — liveness + config probe
 ```
+
+---
+
+## Uptime Kuma integration
+
+The dashboard also monitors the **homelab** infrastructure via **Uptime Kuma** (running behind Cloudflare Tunnel at `homelab.lucafchala.com`).
+
+**How it works:**
+
+- **Fotos → Kuma:** `fotos.lucafchala.com` sends a heartbeat push to Kuma with every request: `GET https://homelab.lucafchala.com/api/push/{ID}?status=up&msg=OK&ping={latency}`
+  - Runs in background (`ctx.waitUntil`) — does not block responses
+  - 5-second timeout; failures logged, not exposed to visitors
+- **Dashboard → Homelab:** `/api/status` checks `homelab.lucafchala.com` availability
+  - Verifies the Tunnel is alive (no Cloudflare error interstitial)
+  - Ensures Kuma is reachable and responding
+- **Kuma ecosystem:** Uptime Kuma independently monitors other homelab services and exposes their status; this dashboard sees the tunnel's health via the homelab.lucafchala.com endpoint
+
+**Benefits:**
+- Zero KV writes added (fotos push runs in-memory)
+- Same alerting + transition logging as first-party services
+- Keeps homelab monitoring decoupled: Kuma owns its own monitors; dashboard owns verifying tunnel access
 
 ---
 
