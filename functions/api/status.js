@@ -627,21 +627,6 @@ export const SERVICES = [
     name: 'Treino', url: 'https://treino.lucafchala.com', marker: 'Hevy',
   },
   {
-    name: 'Edifício Maison Blanche', url: 'https://edificio-maison-blanche.lucafchala.com', marker: 'Maison Blanche',
-  },
-  {
-    // The static page is the front end; the real functional surface is the
-    // Worker it POSTs/GETs to. Both get checked: the page renders, and the
-    // leaderboard Worker (a separate origin, not covered by the primary probe)
-    // actually answers with the shape the front end expects.
-    name: 'Restricted', url: 'https://restricted.lucafchala.com', marker: 'restricted.lucafchala.com',
-    checks: () => [
-      checkJson('leaderboard (Worker)', 'https://ctf-leaderboard.lucafchala.workers.dev/?action=list', (j) => (
-        j && Array.isArray(j.entries) ? null : { detail: 'campo entries ausente' }
-      )),
-    ],
-  },
-  {
     // The dashboard monitors itself: its own /api/healthz exposes whether the
     // STATUS_KV binding, the Resend key, and the admin recipient are present —
     // the exact config drift that silently breaks alerting/subscriptions. (A
