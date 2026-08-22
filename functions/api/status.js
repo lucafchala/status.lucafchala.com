@@ -653,18 +653,6 @@ export const SERVICES = [
       checkResend('entrega de alertas (Resend)', env),
     ],
   },
-  {
-    name: 'Homelab', url: 'https://homelab.lucafchala.com', marker: 'status',
-    checks: (b) => [
-      // Verify Cloudflare Tunnel is active by checking Kuma dashboard loads.
-      // Primary probe validates the "status" marker; this confirms the page
-      // structure (no CF error interstitial masking as a successful response).
-      checkContent('Tunnel ativo (sem erro CF)', b + '/status', {
-        contentType: 'text/html',
-        marker: 'uptime' // Kuma's dashboard has this string
-      }),
-    ],
-  },
 ];
 
 async function checkService(svc, env) {
