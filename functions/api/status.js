@@ -675,16 +675,70 @@ async function checkService(svc, env) {
 // Change detection and notifications run server-side off each fresh sweep:
 // previous state lives in STATUS_KV, so the emailing decision never depends
 // on anything a client sends (the old public /api/notify-all was an open relay).
+// ---------------------------------------------------------------------------
+// Piso entre varreduras REAIS, em memória do isolate
+// ---------------------------------------------------------------------------
+// O cache de borda tem 30 s, mas a chave dele é a URL INTEIRA — query incluída.
+// Isso é proposital: é assim que o cron do GitHub Actions força uma varredura
+// fresca, acrescentando `?t=<aleatório>`.
+//
+// O problema é que essa porta não é só do cron. Qualquer pessoa acrescenta uma
+// query aleatória e provoca uma varredura COMPLETA: são ~20 fetches de saída
+// para os subdomínios do dono a cada requisição. Um laço de curl vira, de
+// graça, um amplificador contra a própria infraestrutura que este painel existe
+// para vigiar — e ainda queima a cota de requisições do Pages.
+//
+// O piso fecha a porta sem tirar a chave do cron: um pedido que fura o cache de
+// borda recebe o resultado da última varredura DESTE isolate se ela for recente
+// demais, em vez de disparar outra. O cron roda a cada 10 min e nunca esbarra
+// nisso; o painel aberto (que pede a cada 60 s) também não. Só o laço de curl
+// esbarra — que é exatamente quem deveria.
+//
+// Estado de módulo, então vale por isolate: um atacante distribuído ainda
+// consegue algum fanout. O que ele NÃO consegue mais é multiplicar sem limite
+// dentro de um isolate, que era o caso barato. Um piso de verdade exigiria
+// escrita de KV por requisição — o recurso mais escasso da conta, e justamente
+// o que não se pode gastar para se defender de um flood.
+const SWEEP_MIN_INTERVAL_MS = 20_000;
+let _lastSweepAt = 0;
+/** @type {{ services: any[], checkedAt: string } | null} */
+let _lastSweep = null;
+
 export async function onRequestGet(context) {
   const cache = caches.default;
   const cacheKey = new Request(context.request.url);
   const hit = await cache.match(cacheKey);
   if (hit) return hit;
 
+  const agora = Date.now();
+  if (_lastSweep && agora - _lastSweepAt < SWEEP_MIN_INTERVAL_MS) {
+    // Serve o resultado recente sem sondar nada e sem repetir a detecção de
+    // mudança: a varredura que produziu este corpo já rodou `detectAndNotify`.
+    return new Response(JSON.stringify(_lastSweep), {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'public, max-age=0, s-maxage=30',
+        // Diz a quem lê que este corpo é reaproveitado, e de quando ele é. Um
+        // painel que mostra "agora" sobre um dado de 15 s atrás mente pouco,
+        // mas mente — e depurar isso sem o cabeçalho é adivinhação.
+        'X-Sweep-Age-Ms': String(agora - _lastSweepAt),
+      },
+    });
+  }
+
   const services = await Promise.all(SERVICES.map((s) => checkService(s, context.env)));
-  const res = new Response(JSON.stringify({ services, checkedAt: new Date().toISOString() }), {
+  const payload = { services, checkedAt: new Date().toISOString() };
+  _lastSweep = payload;
+  _lastSweepAt = agora;
+
+  const res = new Response(JSON.stringify(payload), {
     // s-maxage caches at the edge only; max-age=0 keeps browsers revalidating
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=0, s-maxage=30' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'public, max-age=0, s-maxage=30',
+    },
   });
   context.waitUntil(cache.put(cacheKey, res.clone()));
   context.waitUntil(detectAndNotify(context.env, services, new URL(context.request.url).origin));
@@ -928,7 +982,22 @@ async function sendAlerts(env, changes) {
     const unsubUrl = sub
       ? `https://status.lucafchala.com/api/unsubscribe?token=${sub.token}`
       : null;
-    return { from: NOTIFY_FROM, reply_to: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
+    const msg = { from: NOTIFY_FROM, reply_to: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
+    // RFC 8058: o cliente de e-mail passa a mostrar o botão nativo de cancelar
+    // inscrição, e o POST de um clique cai no `onRequestPost` do
+    // /api/unsubscribe. Só para quem é inscrito — o NOTIFY_TO do dono não tem
+    // token e não deve poder se descadastrar dos próprios alertas por engano.
+    //
+    // O par de cabeçalhos vem junto ou não vem: `List-Unsubscribe` sozinho faz
+    // o cliente cair no modo antigo (abrir o link), que é justamente o GET que
+    // deixou de executar a ação.
+    if (unsubUrl) {
+      msg.headers = {
+        'List-Unsubscribe': `<${unsubUrl}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      };
+    }
+    return msg;
   });
 
   await fetch('https://api.resend.com/emails/batch', {
