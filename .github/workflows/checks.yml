@@ -26,6 +26,14 @@ jobs:
       - name: Security headers file present
         run: test -f _headers
 
+      - name: Function behaviour tests
+        # Executor embutido do Node — este repositório não tem package.json e
+        # não precisa ganhar um para ter teste. Cobre os controles que falham em
+        # silêncio: CSRF e trava por IP no /api/subscribe, o GET do
+        # /api/unsubscribe que não pode mais apagar ninguém, e o escape da
+        # página que mostra o endereço de quem cancelou.
+        run: node --test tests/*.test.mjs
+
       - name: JS module syntax check (functions)
         run: |
           node -e '

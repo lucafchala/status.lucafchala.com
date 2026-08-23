@@ -21,7 +21,8 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 ```
             ┌────────────────────────── browser (index.html) ──────────────────────────┐
             │  on load + every 60s:  GET /api/status   GET /api/third-party-status       │
-            │  subscribe form:       POST /api/subscribe       (unsub link → GET /api/unsubscribe)
+            │  subscribe form:       POST /api/subscribe       (unsub link → GET /api/unsubscribe shows,
+            │                                                          POST performs — RFC 8058 one-click)
             └───────────────────────────────────┬───────────────────────────────────────┘
                                                  │  Cloudflare Pages Functions (/functions/api/*)
                           ┌──────────────────────┼─────────────────────────┐
@@ -45,8 +46,8 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 |---|---|---|---|
 | `/api/status` | GET | **Functional** health‑checks of the 13 first‑party services in parallel (GET, 10 s timeout). Each service has a primary availability probe (status code + latency + a content marker proving the right page rendered) plus optional sub‑checks — running server‑side means it can read response bodies cross‑origin, which the browser can't. Returns `{ services: [{ name, url, status, statusCode, rt, checks, problems }], checkedAt }`, where `checks` is `[{ label, status, detail }]` and `problems` is a list of human‑readable failures. A service's status is the **worst** of all its checks. **Base rules:** HTTP ≥ 500 → `down`; 400–499, slow (`rt` > 2500 ms), unexpected/empty content, missing data files, or a failing `/api/healthz` → `degraded`/`down`. Edge-cached 30 s. On fresh sweeps, also runs server-side change detection + alert emails (which list **every** failing check for a changed service, not just the first). | (emails need `RESEND_API_KEY`, `NOTIFY_TO`, `STATUS_KV`) |
 | `/api/third-party-status` | GET | Checks provider status pages (GitHub, Cloudflare, Anthropic, Resend, Google Cloud), 8 s timeout, with provider‑specific parsing (e.g. Cloudflare filtered to Brazil PoPs). Edge-cached 30 s. | — |
-| `/api/subscribe` | POST | Adds an email to KV (with a UUID token), sends a welcome email via Resend. Returns `{ ok, already }`. | `RESEND_API_KEY`, `NOTIFY_TO`, `NOTIFY_FROM`, `STATUS_KV` |
-| `/api/unsubscribe?token=…` | GET | Removes the subscriber matching `token`, returns a small HTML confirmation page. | `STATUS_KV` |
+| `/api/subscribe` | POST | Adds an email to KV (with a UUID token), sends a welcome email via Resend. Returns `{ ok, already }`. **The only public endpoint that writes KV *and* makes a third party send mail to an address the caller chooses** — so it is gated: same‑site check (`Sec-Fetch-Site`, inforjável por script), a per‑IP throttle held in isolate memory, and a hard cap of 2000 subscribers. Errors never name a missing binding and never echo Resend's raw response body; both go to the log instead. | `RESEND_API_KEY`, `NOTIFY_TO`, `NOTIFY_FROM`, `STATUS_KV` |
+| `/api/unsubscribe?token=…` | GET / POST | **GET only shows a confirmation page — it changes nothing.** GET is defined as safe (RFC 9110 §9.2.1), and the infrastructure this link travels through acts on that: corporate mail scanners, link previews and browser prefetch all open every URL in a message, and each of them used to unsubscribe the reader before they had read it. The **POST** performs the removal, which is also the shape RFC 8058 specifies for the mail client's native unsubscribe button — so one click still does it, it just can't be triggered by anyone but the person. Repeating the POST is success, not an error. | `STATUS_KV` |
 | `/api/status-history` | GET | The 48 h transition log: `{ entries, services, flapping, worstSeverity }`. `services[name].lastIncident` gives severity, start, duration, whether it's resolved and how long ago — the context a live‑only dashboard structurally can't show. `flapping` names services with ≥ 4 transitions in the window, the failure a 60‑second poll hides best. Corrupt KV reads as an empty log, never a 500. Edge-cached 30 s. | `STATUS_KV` |
 | `/api/quota-stats` | GET | Cloudflare free‑tier headroom (KV writes/reads/deletes/lists + storage, Workers requests + CPU p99, D1 rows) and TLS certificate expiry per zone. Each dataset is queried separately so one unreadable dataset costs that row only, not the panel; a dataset that fails reports `status: unknown` (never `up`) and is listed in `errors[]`. Warns at 75 % of a limit, critical at 95 %; certificates flag under 30 days. Edge-cached 5 min. Answers `configured: false` when the API token is absent. | `CF_API_TOKEN`, `CF_ACCOUNT_ID` |
 | `/api/latency-trends` | GET | Response‑time trend per service over 48 h: `{ services, worsening, entries, samples }`. `services[name]` carries `p50/p95/p99`, `min/max` and a `trend` comparing the recent half of the window against the older half. Answers the question a live dashboard structurally can't — not *"is it slow?"* but *"is it **getting** slow?"* — since a service that drifts from 300 ms to 1800 ms is still green and still the earliest warning available. Measures nothing new: `rt` is already taken every sweep and was simply discarded. Written at most **once every 30 min** (≈48 KV writes/day, ~5 % of the free‑tier quota) rather than once per 5‑minute sweep (288/day, ~29 %). Corrupt KV reads as an empty series, never a 500. Edge-cached 2 min. | `STATUS_KV` |
@@ -132,6 +133,11 @@ git push origin main               # Cloudflare Pages builds & deploys automatic
 # (or: npx wrangler pages deploy .)
 ```
 
+```bash
+# tests — executor embutido do Node, sem dependência nenhuma
+node --test tests/*.test.mjs
+```
+
 Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler pages secret put RESEND_API_KEY`).
 
 ---
@@ -149,9 +155,11 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
         ├── quota-stats.js           # GET  /api/quota-stats         — Cloudflare free-tier headroom + TLS expiry
         ├── latency-trends.js        # GET  /api/latency-trends      — 48h response-time percentiles + trend; owns the series' shape for the writer in status.js
         ├── third-party-status.js    # GET  /api/third-party-status  — checks GitHub/Cloudflare/Anthropic/Resend/Google
-        ├── subscribe.js             # POST /api/subscribe           — add email to KV + welcome mail
-        ├── unsubscribe.js           # GET  /api/unsubscribe?token=…  — remove subscriber
+        ├── subscribe.js             # POST /api/subscribe           — add email to KV + welcome mail (same-site + per-IP throttle + cap)
+        ├── unsubscribe.js           # GET  shows the confirmation, POST performs it (RFC 9110 §9.2.1 / RFC 8058)
         └── healthz.js               # GET  /api/healthz             — liveness + config probe
+└── tests/
+    └── functions.test.mjs           # node --test — the controls that fail silently, asserted
 ```
 
 ---
