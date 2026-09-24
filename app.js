@@ -687,10 +687,57 @@ function renderQuotas(data) {
   }).join('');
   const errors = (data.errors || []).length
     ? `<div class="panel-empty aviso">não lido: ${esc(data.errors.join(' · '))}</div>` : '';
-  panel.innerHTML = quotas + certs + errors +
+  panel.innerHTML = quotas + certs + detalheWorkers(data) + errors +
     (data.note ? `<div class="panel-empty mt">${esc(data.note)}</div>` : '');
   // Largura das barras pelo CSSOM: atributo de estilo no HTML a CSP bloqueia.
   panel.querySelectorAll('[data-largura]').forEach(el => { el.style.width = el.dataset.largura + '%'; });
+}
+
+// O que a Cloudflare já mede de cada Worker, sem sonda nenhuma: requisições,
+// invocações com erro e CPU por script, o fotos hora a hora, e as chamadas a
+// Durable Objects (contadores e rate limit do fotos).
+function detalheWorkers(data) {
+  let html = '';
+  const ws = Array.isArray(data.porWorker) ? data.porWorker : null;
+  if (ws && ws.length) {
+    html += `
+      <table class="tabela">
+        <caption>Por Worker, hoje</caption>
+        <colgroup><col class="c-script" /><col /><col /><col /></colgroup>
+        <thead><tr><th scope="col">script</th><th scope="col">requisições</th><th scope="col">erros</th><th scope="col">CPU p50 / p99</th></tr></thead>
+        <tbody>${ws.map(w => `
+          <tr>
+            <th scope="row" title="${esc(w.script)}">${esc(w.script)}</th>
+            <td>${fmtNum(w.requests)}</td>
+            <td class="${w.errosPct >= 5 ? 'down' : w.errosPct >= 1 ? 'degraded' : ''}">${fmtNum(w.errors)}${w.errosPct != null ? ` (${String(w.errosPct).replace('.', ',')} %)` : ''}</td>
+            <td>${w.cpuP50Ms == null ? '—' : String(w.cpuP50Ms).replace('.', ',')} / ${w.cpuP99Ms == null ? '—' : String(w.cpuP99Ms).replace('.', ',')} ms</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+  const ph = data.workerPorHora;
+  if (ph && Array.isArray(ph.horas) && ph.horas.length) {
+    const tot = ph.horas.reduce((a, h) => ({ r: a.r + h.requests, e: a.e + h.errors }), { r: 0, e: 0 });
+    const cpuMax = Math.max(...ph.horas.map(h => h.cpuP99Ms || 0));
+    const barras = ph.horas.map(h => {
+      const pct = h.requests ? (h.errors / h.requests) * 100 : 0;
+      const cls = !h.requests ? 'nd' : pct >= 5 ? 'down' : pct > 0 ? 'degraded' : 'up';
+      const quando = hora(Date.parse(h.hora));
+      return `<span class="b ${cls}" title="${esc(`${quando}: ${fmtNum(h.requests)} requisições · ${fmtNum(h.errors)} erros · CPU p99 ${h.cpuP99Ms ?? '—'} ms`)}"></span>`;
+    }).join('');
+    html += `
+      <div class="por-hora">
+        <p class="por-hora-titulo">${esc(ph.script)} · últimas 24 h, por hora</p>
+        <div class="barras curtas" role="img" aria-label="${esc(`${ph.script}, últimas 24 horas: ${fmtNum(tot.r)} requisições, ${fmtNum(tot.e)} com erro, CPU p99 máxima ${cpuMax} ms`)}">${barras}</div>
+        <p class="panel-empty">${fmtNum(tot.r)} requisições · ${fmtNum(tot.e)} com erro · CPU p99 máx. ${String(cpuMax).replace('.', ',')} ms</p>
+      </div>`;
+  }
+  const dobj = data.durableObjects;
+  if (dobj && dobj.requests != null) {
+    html += `<div class="panel-empty mt">Durable Objects hoje: ${fmtNum(dobj.requests)} requisições${
+      (dobj.porScript || []).length ? ' (' + esc(dobj.porScript.map(d => `${d.script} ${fmtNum(d.requests)}`).join(' · ')) + ')' : ''}</div>`;
+  }
+  return html;
 }
 
 // ── Ciclo de atualização ────────────────────────────────────────────────
