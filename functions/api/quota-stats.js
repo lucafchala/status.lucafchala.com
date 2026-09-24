@@ -99,11 +99,35 @@ const Q_D1 = `query($accountTag:String!,$sinceDate:Date!,$untilDate:Date!){viewe
   d1AnalyticsAdaptiveGroups(limit:100,filter:{date_geq:$sinceDate,date_leq:$untilDate}){sum{rowsRead rowsWritten}dimensions{databaseId}}
 }}}`;
 
+// O Worker do fotos hora a hora nas últimas 24 h: requisições, invocações
+// com erro (exceção, CPU estourada) e CPU p99. É o "extremamente detalhado"
+// que não custa sonda nenhuma — a Cloudflare já mede tudo isso de cada
+// invocação, e a GraphQL Analytics não gasta cota de Worker. Consulta à parte
+// das de cota: se um campo não existir no plano, cai só esta linha.
+const Q_WORKER_HORA = `query($accountTag:String!,$since:Time!,$until:Time!,$script:String!){viewer{accounts(filter:{accountTag:$accountTag}){
+  workersInvocationsAdaptive(limit:48,filter:{scriptName:$script,datetime_geq:$since,datetime_leq:$until},orderBy:[datetimeHour_ASC]){sum{requests errors}quantiles{cpuTimeP99}dimensions{datetimeHour}}
+}}}`;
+
+// Durable Objects: o fotos guarda contadores e rate limit neles, e o painel
+// de cotas não os mostrava. Cada chamada a um DO é uma requisição a mais que
+// o painel de Workers não conta do mesmo jeito.
+const Q_DO = `query($accountTag:String!,$since:Time!,$until:Time!){viewer{accounts(filter:{accountTag:$accountTag}){
+  durableObjectsInvocationsAdaptiveGroups(limit:100,filter:{datetime_geq:$since,datetime_leq:$until}){sum{requests}dimensions{scriptName}}
+}}}`;
+
+// Worker detalhado hora a hora (o que mais importa acompanhar).
+export const WORKER_DETALHADO = 'fotos';
+
 // Storage is a point-in-time maximum per namespace/database, so the account
 // total is the sum of each one's latest peak — not a sum over the time series.
 function sumMax(rows, field) {
   if (!Array.isArray(rows) || !rows.length) return null;
   return rows.reduce((acc, r) => acc + (r?.max?.[field] || 0), 0);
+}
+
+// A GraphQL devolve CPU em microssegundos.
+function msDeUs(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.round(v / 100) / 10 : null;
 }
 
 function sumOf(rows, field) {
@@ -116,11 +140,16 @@ async function collectUsage(token, accountTag) {
   const usage = {};
   const errors = [];
 
-  const [kvOps, kvStore, workers, d1] = await Promise.all([
+  const agora = new Date();
+  const ontem = new Date(agora.getTime() - 24 * 3600_000);
+  const [kvOps, kvStore, workers, d1, hora, dobj] = await Promise.all([
     gql(token, accountTag, Q_KV_OPS, { since: w.since, until: w.until }).catch(e => { errors.push(`KV ops: ${e.message}`); return null; }),
     gql(token, accountTag, Q_KV_STORAGE, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(`KV storage: ${e.message}`); return null; }),
     gql(token, accountTag, Q_WORKERS, { since: w.since, until: w.until }).catch(e => { errors.push(`Workers: ${e.message}`); return null; }),
     gql(token, accountTag, Q_D1, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(`D1: ${e.message}`); return null; }),
+    gql(token, accountTag, Q_WORKER_HORA, { since: ontem.toISOString(), until: agora.toISOString(), script: WORKER_DETALHADO })
+      .catch(e => { errors.push(`${WORKER_DETALHADO} por hora: ${e.message}`); return null; }),
+    gql(token, accountTag, Q_DO, { since: w.since, until: w.until }).catch(e => { errors.push(`Durable Objects: ${e.message}`); return null; }),
   ]);
 
   if (kvOps) {
@@ -145,6 +174,41 @@ async function collectUsage(token, accountTag) {
     // worst p99 across scripts, since that's what approaches the 10 ms ceiling.
     const p99s = rows.map(r => r?.quantiles?.cpuTimeP99).filter(v => typeof v === 'number');
     usage.cpuP99Us = p99s.length ? Math.max(...p99s) : null;
+    // A mesma consulta já vinha por Worker e era somada: o detalhe sai de
+    // graça. Taxa de erro e CPU por script é o que diz QUAL Worker está mal.
+    usage.porWorker = rows
+      .map(r => {
+        const req = r?.sum?.requests || 0;
+        const err = r?.sum?.errors || 0;
+        return {
+          script: r?.dimensions?.scriptName || '?',
+          requests: req,
+          errors: err,
+          errosPct: req ? Math.round((err / req) * 10000) / 100 : null,
+          cpuP50Ms: msDeUs(r?.quantiles?.cpuTimeP50),
+          cpuP99Ms: msDeUs(r?.quantiles?.cpuTimeP99),
+        };
+      })
+      .sort((a, b) => b.requests - a.requests);
+  }
+  if (hora) {
+    usage.workerPorHora = {
+      script: WORKER_DETALHADO,
+      horas: (hora.workersInvocationsAdaptive || []).map(r => ({
+        hora: r?.dimensions?.datetimeHour || null,
+        requests: r?.sum?.requests || 0,
+        errors: r?.sum?.errors || 0,
+        cpuP99Ms: msDeUs(r?.quantiles?.cpuTimeP99),
+      })).filter(h => h.hora),
+    };
+  }
+  if (dobj) {
+    const rows = dobj.durableObjectsInvocationsAdaptiveGroups || [];
+    usage.durableObjects = {
+      requests: sumOf(rows, 'requests'),
+      porScript: rows.map(r => ({ script: r?.dimensions?.scriptName || '?', requests: r?.sum?.requests || 0 }))
+        .sort((a, b) => b.requests - a.requests),
+    };
   }
   if (d1) {
     const rows = d1.d1AnalyticsAdaptiveGroups || [];
@@ -283,6 +347,12 @@ export async function lerCotas(context) {
         ? Math.round(usageResult.usage.cpuP99Us / 1000 * 10) / 10
         : null,
     },
+    // Detalhe que não é cota (não entra em alerta nem em `status`): serve para
+    // ler, não para disparar e-mail. Ausente = consulta que não respondeu, e
+    // o motivo está em `errors`.
+    porWorker: usageResult.usage.porWorker ?? null,
+    workerPorHora: usageResult.usage.workerPorHora ?? null,
+    durableObjects: usageResult.usage.durableObjects ?? null,
     // Surfaced rather than swallowed: a dataset we couldn't read is itself
     // worth knowing about, since it silently hides a quota.
     errors: usageResult.errors,

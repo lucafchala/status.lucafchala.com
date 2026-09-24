@@ -113,3 +113,60 @@ describe('/api/painel', () => {
     assert.equal(fetches.length, 0, 'terceiros já estava no cache pela chave fixa');
   });
 });
+
+const quota = await import('../functions/api/quota-stats.js');
+
+describe('/api/quota-stats — o que a Cloudflare já mede de cada Worker', () => {
+  function cloudflare({ doQuebrado = false } = {}) {
+    globalThis.fetch = async (input, init) => {
+      const url = String(input?.url || input);
+      if (url.endsWith('/graphql')) {
+        const q = JSON.parse(init.body).query;
+        if (q.includes('durableObjectsInvocationsAdaptiveGroups')) {
+          if (doQuebrado) return new Response(JSON.stringify({ errors: [{ message: 'unknown field' }] }));
+          return new Response(JSON.stringify({ data: { viewer: { accounts: [{ durableObjectsInvocationsAdaptiveGroups: [{ sum: { requests: 340 }, dimensions: { scriptName: 'fotos' } }] }] } } }));
+        }
+        if (q.includes('datetimeHour')) {
+          return new Response(JSON.stringify({ data: { viewer: { accounts: [{ workersInvocationsAdaptive: [
+            { sum: { requests: 100, errors: 0 }, quantiles: { cpuTimeP99: 4100 }, dimensions: { datetimeHour: '2026-09-24T10:00:00Z' } },
+            { sum: { requests: 80, errors: 4 }, quantiles: { cpuTimeP99: 39100 }, dimensions: { datetimeHour: '2026-09-24T11:00:00Z' } },
+          ] }] } } }));
+        }
+        if (q.includes('workersInvocationsAdaptive')) {
+          return new Response(JSON.stringify({ data: { viewer: { accounts: [{ workersInvocationsAdaptive: [
+            { sum: { requests: 180, errors: 4 }, quantiles: { cpuTimeP50: 1200, cpuTimeP99: 39100 }, dimensions: { scriptName: 'fotos' } },
+            { sum: { requests: 900, errors: 0 }, quantiles: { cpuTimeP50: 800, cpuTimeP99: 3000 }, dimensions: { scriptName: 'status-agendador' } },
+          ] }] } } }));
+        }
+        return new Response(JSON.stringify({ data: { viewer: { accounts: [{}] } } }));
+      }
+      if (url.includes('/zones?')) return new Response(JSON.stringify({ success: true, result: [] }));
+      return new Response('{}', { status: 404 });
+    };
+  }
+  const ctx = () => ({ request: new Request('https://status.lucafchala.com/api/quota-stats'), env: { CF_API_TOKEN: 't', CF_ACCOUNT_ID: 'a' }, waitUntil() {} });
+
+  test('detalhe por Worker, com taxa de erro e CPU em ms, maior primeiro', async () => {
+    cloudflare();
+    const body = await quota.lerCotas(ctx());
+    assert.deepEqual(body.porWorker.map((w) => w.script), ['status-agendador', 'fotos']);
+    const fotos = body.porWorker.find((w) => w.script === 'fotos');
+    assert.equal(fotos.errosPct, 2.22);
+    assert.equal(fotos.cpuP50Ms, 1.2);
+    assert.equal(fotos.cpuP99Ms, 39.1);
+    assert.equal(body.workerPorHora.script, 'fotos');
+    assert.equal(body.workerPorHora.horas.length, 2);
+    assert.equal(body.durableObjects.requests, 340);
+    // Somas de cota continuam as mesmas.
+    assert.equal(body.quotas.find((q) => q.key === 'workerRequests').used, 1080);
+  });
+
+  test('consulta nova que falha custa só a própria linha', async () => {
+    cloudflare({ doQuebrado: true });
+    const body = await quota.lerCotas(ctx());
+    assert.equal(body.durableObjects, null);
+    assert.ok(body.errors.some((e) => /Durable Objects/.test(e)));
+    assert.ok(body.porWorker.length === 2, 'o resto segue');
+    assert.equal(body.quotas.find((q) => q.key === 'workerRequests').used, 1080);
+  });
+});
