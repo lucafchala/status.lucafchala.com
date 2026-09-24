@@ -41,6 +41,96 @@ export async function readHistory(KV) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Linha do tempo reconstruída do log — as barras e o uptime SEM o D1
+// ---------------------------------------------------------------------------
+// Com o retrato em D1 (retrato.js), barras e uptime saem da contagem de cada
+// varredura. Sem ele, ainda dá para desenhar 48 barras horárias a custo ZERO:
+// o estado atual (`last_status`) mais as transições deste log determinam o
+// estado de cada serviço em cada instante da janela — andando para trás, antes
+// de cada transição o estado era o `from` dela.
+//
+// Duas honestidades:
+//   • o log tem teto (HISTORY_MAX). Se encheu, antes da entrada mais antiga não
+//     se sabe nada — e esse trecho sai como "sem dado", não como verde;
+//   • é o estado REGISTRADO, amostrado pelas varreduras. Uma queda que começou
+//     e acabou entre duas varreduras não existe para este log (nem para o D1).
+export const BARRAS_HORAS = 48;
+const HORA_MS = 3600_000;
+
+export function linhaDoTempo(entries, atual, agora = Date.now(), janela = HISTORY_WINDOW_MS) {
+  const inicio = agora - janela;
+  const cronologicas = Array.isArray(entries) ? entries : [];
+  const cortado = cronologicas.length >= HISTORY_MAX;
+  const limite = cortado
+    ? Math.max(inicio, new Date(cronologicas[cronologicas.length - 1].at).getTime())
+    : inicio;
+
+  const nomes = new Set([...Object.keys(atual || {}), ...cronologicas.map((e) => e.name)]);
+  const servicos = {};
+  for (const nome of nomes) {
+    const trans = cronologicas.filter((e) => e.name === nome); // mais nova primeiro
+    const segs = [];
+    let fim = agora;
+    let estado = (atual && atual[nome]) || (trans[0] && trans[0].to) || null;
+    for (const t of trans) {
+      const at = new Date(t.at).getTime();
+      if (!Number.isFinite(at) || at < limite) break;
+      if (at < fim) segs.push({ de: at, ate: fim, estado });
+      fim = Math.min(fim, at);
+      estado = t.from || null;
+    }
+    if (fim > limite) segs.push({ de: limite, ate: fim, estado });
+    servicos[nome] = segs.reverse();
+  }
+  return { inicio, limite, agora, servicos };
+}
+
+const PIOR = { up: 0, degraded: 1, down: 2 };
+
+// Tempo fora do ar e tempo conhecido de um serviço num intervalo.
+function medir(segs, de, ate) {
+  let conhecido = 0, fora = 0, pior = null;
+  for (const s of segs) {
+    const a = Math.max(de, s.de), b = Math.min(ate, s.ate);
+    if (b <= a || !s.estado || !(s.estado in PIOR)) continue;
+    conhecido += b - a;
+    if (s.estado === 'down') fora += b - a;
+    if (pior == null || PIOR[s.estado] > PIOR[pior]) pior = s.estado;
+  }
+  return { conhecido, fora, pior };
+}
+
+// Mesmo formato normalizado que retrato.barrasDiarias devolve — a página
+// desenha os dois sem saber de onde vieram.
+export function barrasHorarias(linha, horas = BARRAS_HORAS) {
+  const fimUltima = Math.floor(linha.agora / HORA_MS) * HORA_MS + HORA_MS;
+  const periodos = [];
+  for (let i = horas - 1; i >= 0; i--) {
+    const de = fimUltima - (i + 1) * HORA_MS;
+    periodos.push({ inicio: new Date(de).toISOString(), fim: new Date(de + HORA_MS).toISOString() });
+  }
+  const servicos = {};
+  for (const [nome, segs] of Object.entries(linha.servicos)) {
+    servicos[nome] = periodos.map((p) => {
+      const m = medir(segs, Date.parse(p.inicio), Math.min(Date.parse(p.fim), linha.agora));
+      if (!m.conhecido) return { estado: null, pct: null };
+      return { estado: m.pior, pct: Math.round(((m.conhecido - m.fora) / m.conhecido) * 10000) / 100 };
+    });
+  }
+  return { tipo: 'horario', fonte: 'transicoes', periodos, servicos };
+}
+
+// Disponibilidade ponderada pelo tempo — só sobre o tempo CONHECIDO.
+export function uptimeTransicoes(linha, desde) {
+  const out = {};
+  for (const [nome, segs] of Object.entries(linha.servicos)) {
+    const m = medir(segs, Math.max(desde, linha.limite), linha.agora);
+    out[nome] = { pct: m.conhecido ? Math.round(((m.conhecido - m.fora) / m.conhecido) * 10000) / 100 : null };
+  }
+  return out;
+}
+
 // Per-service summary of the last incident: when it started, how long it took
 // to recover, and whether it is still open. `entries` is newest-first, so a
 // service's recovery is the *earlier* index and its onset the later one.

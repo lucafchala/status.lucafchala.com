@@ -14,6 +14,7 @@
 // this writer and that reader can never drift apart.
 import { HISTORY_KEY, readHistory, trimHistory } from './status-history.js';
 import { LATENCY_KEY, readLatency, trimLatency, shouldSample, buildSample } from './latency-trends.js';
+import { lerRetrato, tomarVez, gravarVarredura, RETRATO_TTL_MS } from './retrato.js';
 
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
@@ -713,7 +714,89 @@ let _lastSweepAt = 0;
 /** @type {{ services: any[], checkedAt: string } | null} */
 let _lastSweep = null;
 
+export async function varrer(env) {
+  const services = await Promise.all(SERVICES.map((s) => checkService(s, env)));
+  return { services, checkedAt: new Date().toISOString() };
+}
+
+// Quem pediu a varredura, pela query. Não é autenticação — qualquer um pode
+// mandar `?varrer` —, e não precisa ser: com o retrato em D1, a trava global
+// (retrato.tomarVez) limita a UMA varredura a cada 4 min para a conta inteira,
+// quantos pedidos vierem. A origem só serve para o registro dizer quem varreu.
+export function origemDoPedido(url) {
+  const src = url.searchParams.get('source');
+  if (src === 'cloudflare-cron') return 'agendador';
+  if (src === 'gha-cron') return 'cron do GitHub';
+  if (url.searchParams.has('varrer')) return 'pedido manual';
+  return null;
+}
+
+function responder(payload, extra = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': extra.cacheControl || 'no-store',
+  };
+  if (extra.idadeMs != null) headers['X-Sweep-Age-Ms'] = String(Math.max(0, extra.idadeMs));
+  if (extra.origem) headers['X-Sweep-Source'] = extra.origem;
+  return new Response(JSON.stringify(payload), { status: extra.status || 200, headers });
+}
+
+// Com o retrato compartilhado: visitante LÊ; só varre quem pediu pela origem
+// (agendador, cron) ou quando o retrato ficou velho demais — agendador
+// atrasado ou morto. Nos dois casos, passando pela trava global.
+//
+// O segundo caso é uma escolha consciente: com o agendador parado, a página
+// mostraria um dado de horas sem nunca se corrigir. Pela trava, o custo desse
+// socorro não cresce com o público — no máximo uma varredura a cada 4 min,
+// com um ou mil visitantes — e ele se desliga sozinho quando o agendador volta.
+async function comRetrato(context, DB) {
+  const url = new URL(context.request.url);
+  const pedido = origemDoPedido(url);
+  const agora = Date.now();
+  const r = await lerRetrato(DB);
+  const idadeMs = r ? agora - r.em : null;
+  const atrasado = idadeMs == null || idadeMs > RETRATO_TTL_MS;
+
+  if ((pedido || atrasado) && await tomarVez(DB, agora)) {
+    const payload = await varrer(context.env);
+    const origem = pedido || 'visitante (retrato atrasado)';
+    const fim = Date.now();
+    context.waitUntil(gravarVarredura(DB, payload, origem, fim)
+      .catch((e) => console.error('retrato: gravação falhou', e)));
+    context.waitUntil(detectAndNotify(context.env, payload.services, url.origin, { latenciaNoD1: true }));
+    return responder({ ...payload, retrato: { origem, idadeMs: 0, atrasado: false } }, { idadeMs: 0, origem });
+  }
+
+  if (!r) {
+    // Banco novo e outra varredura em curso (a trava está com ela): não há o
+    // que mostrar ainda, e varrer de novo seria exatamente o que a trava evita.
+    const res = responder({ erro: 'primeira varredura em andamento', services: [] }, { status: 503 });
+    res.headers.set('Retry-After', '60');
+    return res;
+  }
+  return responder(
+    { ...r.payload, retrato: { origem: r.origem, idadeMs, atrasado } },
+    { idadeMs, origem: r.origem },
+  );
+}
+
 export async function onRequestGet(context) {
+  const DB = context.env.STATUS_DB;
+  if (DB) {
+    try {
+      return await comRetrato(context, DB);
+    } catch (e) {
+      // D1 fora do ar não pode apagar o painel: cai para o comportamento de
+      // antes do retrato (varredura por pedido, com cache e piso por isolate).
+      console.error('retrato indisponível; varredura por pedido', e);
+    }
+  }
+  return semRetrato(context);
+}
+
+// Sem STATUS_DB: o comportamento de sempre.
+async function semRetrato(context) {
   const cache = caches.default;
   const cacheKey = new Request(context.request.url);
   const hit = await cache.match(cacheKey);
@@ -736,8 +819,8 @@ export async function onRequestGet(context) {
     });
   }
 
-  const services = await Promise.all(SERVICES.map((s) => checkService(s, context.env)));
-  const payload = { services, checkedAt: new Date().toISOString() };
+  const payload = await varrer(context.env);
+  const services = payload.services;
   _lastSweep = payload;
   _lastSweepAt = agora;
 
@@ -832,7 +915,7 @@ async function quotaEntries(origin) {
   }
 }
 
-export async function detectAndNotify(env, services, origin) {
+export async function detectAndNotify(env, services, origin, { latenciaNoD1 = false } = {}) {
   const KV = env.STATUS_KV;
   if (!KV) return;
 
@@ -912,7 +995,10 @@ export async function detectAndNotify(env, services, origin) {
   //
   // A decisão lê a série antes (uma leitura de KV por varredura; leitura é
   // 100× mais farta que escrita) em vez de olhar o relógio: ver shouldSample.
-  try {
+  //
+  // Com o retrato em D1, a série sai de lá — uma amostra por varredura, sem
+  // custo de KV — e este bloco não roda: zero escrita de KV para latência.
+  if (!latenciaNoD1) try {
     const series = await readLatency(KV);
     if (shouldSample(series)) {
       const sample = buildSample(services);

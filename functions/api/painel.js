@@ -17,8 +17,9 @@
 
 import { verificarTerceiros } from './third-party-status.js';
 import { lerCotas } from './quota-stats.js';
-import { resumoHistorico } from './status-history.js';
-import { resumoLatencia } from './latency-trends.js';
+import { resumoHistorico, linhaDoTempo, barrasHorarias, uptimeTransicoes } from './status-history.js';
+import { resumoLatencia, resumoDeEntradas } from './latency-trends.js';
+import { lerRetrato, lerSerie, lerBarrasDiarias, uptimeDe, RETRATO_TTL_MS } from './retrato.js';
 
 // Mesma ordem de grandeza do que ele agrega: o histórico e a latência só mudam
 // quando uma varredura roda, terceiros e cotas têm cache próprio de 2 e 5 min.
@@ -33,15 +34,90 @@ async function secao(nome, fn) {
   }
 }
 
+// As barras de 90 dias mudam devagar (só o dia de hoje anda) e cada leitura
+// custa ~1.200 linhas lidas no D1 (13 serviços × 90 dias). Cache próprio de
+// 10 min, para não pagar isso a cada minuto de cada colo.
+export const BARRAS_CACHE_S = 600;
+
+async function barrasCacheadas(context, DB) {
+  const cache = caches.default;
+  const key = new Request(new URL(context.request.url).origin + '/api/painel/barras-diarias');
+  const hit = await cache.match(key);
+  if (hit) return hit.json();
+  const barras = await lerBarrasDiarias(DB);
+  context.waitUntil(cache.put(key, new Response(JSON.stringify(barras), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=0, s-maxage=${BARRAS_CACHE_S}` },
+  })));
+  return barras;
+}
+
+// Com o retrato em D1 o painel traz TUDO — inclusive o status, lido, não
+// varrido — e a página faz uma chamada só. Sem ele, o status fica de fora
+// (a página chama /api/status) e barras e uptime saem do log de transições.
+async function comRetrato(context, DB) {
+  const agora = Date.now();
+  const [r, serie, barras] = await Promise.all([
+    lerRetrato(DB),
+    lerSerie(DB, agora),
+    secao('barras', () => barrasCacheadas(context, DB)),
+  ]);
+  const idadeMs = r ? agora - r.em : null;
+  return {
+    status: r ? { ...r.payload, retrato: { origem: r.origem, idadeMs, atrasado: idadeMs > RETRATO_TTL_MS } } : null,
+    latencia: resumoDeEntradas(serie, null),
+    barras,
+    uptime: {
+      fonte: 'd1',
+      h24: uptimeDe(serie, agora - 24 * 3600_000),
+      h48: uptimeDe(serie, agora - 48 * 3600_000),
+    },
+  };
+}
+
+async function semRetrato(KV, historico) {
+  const agora = Date.now();
+  let atual = {};
+  try { atual = JSON.parse((KV && await KV.get('last_status')) || '{}') || {}; } catch { atual = {}; }
+  const linha = linhaDoTempo(historico && !historico.erro ? historico.entries : [], atual, agora);
+  return {
+    status: null,
+    latencia: await resumoLatencia(KV),
+    barras: KV ? barrasHorarias(linha) : { erro: 'STATUS_KV ausente — sem histórico para desenhar' },
+    uptime: KV ? {
+      fonte: 'transicoes',
+      h24: uptimeTransicoes(linha, agora - 24 * 3600_000),
+      h48: uptimeTransicoes(linha, agora - 48 * 3600_000),
+    } : null,
+  };
+}
+
 export async function montarPainel(context) {
   const KV = context.env.STATUS_KV;
-  const [terceiros, cotas, historico, latencia] = await Promise.all([
+  const DB = context.env.STATUS_DB;
+  const [terceiros, cotas, historico] = await Promise.all([
     secao('terceiros', () => verificarTerceiros(context)),
     secao('cotas', () => lerCotas(context)),
     secao('historico', () => resumoHistorico(KV)),
-    secao('latencia', () => resumoLatencia(KV)),
   ]);
-  return { terceiros, cotas, historico, latencia, geradoEm: new Date().toISOString() };
+
+  let serie = null;
+  let retratoCompartilhado = false;
+  if (DB) {
+    try { serie = await comRetrato(context, DB); retratoCompartilhado = true; }
+    catch (e) { console.error('painel: D1 não respondeu; usando o KV', e); }
+  }
+  if (!serie) serie = await secao('serie', () => semRetrato(KV, historico));
+
+  return {
+    status: serie.status ?? null,
+    terceiros, cotas, historico,
+    latencia: serie.latencia ?? { erro: 'não foi possível ler agora' },
+    barras: serie.barras ?? { erro: 'não foi possível ler agora' },
+    uptime: serie.uptime ?? null,
+    // A página decide por aqui se ainda precisa chamar /api/status.
+    retratoCompartilhado,
+    geradoEm: new Date().toISOString(),
+  };
 }
 
 export async function onRequestGet(context) {
