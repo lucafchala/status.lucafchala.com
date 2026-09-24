@@ -161,7 +161,13 @@ export async function resumoLatencia(KV) {
     };
   }
 
-  const entries = await readLatency(KV);
+  return resumoDeEntradas(await readLatency(KV), LATENCY_INTERVAL_MS / 60_000);
+}
+
+// Resumo a partir de uma série já lida — do KV (uma amostra a cada 30 min) ou
+// do D1 (uma por varredura, retrato.lerSerie). `intervalMinutes` null quer
+// dizer "uma por varredura".
+export function resumoDeEntradas(entries, intervalMinutes) {
   const services = summarize(entries);
 
   // Quem está piorando vem primeiro: é a lista que serve para agir.
@@ -173,7 +179,7 @@ export async function resumoLatencia(KV) {
   return {
     available: true,
     windowHours: LATENCY_WINDOW_MS / 3600_000,
-    intervalMinutes: LATENCY_INTERVAL_MS / 60_000,
+    intervalMinutes,
     samples: entries.length,
     services,
     worsening,

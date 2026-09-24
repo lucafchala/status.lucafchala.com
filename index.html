@@ -763,6 +763,8 @@
   let ultimaAtualizacao = 0;     // relógio do navegador, fim da última tentativa
   let ultimaVarredura = null;    // checkedAt da última varredura recebida (ms)
   let proximaEm = null;          // quando a próxima atualização está marcada (ms)
+  let modoRetrato = null;        // o servidor tem retrato compartilhado? (null: ainda não sei)
+  let retratoAtrasado = false;   // o agendador passou da hora
 
   // Resposta que não é 2xx, ou corpo que não é JSON, conta como falha — não
   // como "tudo offline". Quem não conseguiu perguntar não sabe a resposta.
@@ -1173,6 +1175,8 @@
     }
     if (falhasSeguidas > 0) {
       partes.push('<span class="stale">sem resposta do servidor</span>');
+    } else if (retratoAtrasado) {
+      partes.push('<span class="stale">agendador atrasado</span>');
     }
     if (proximaEm != null) {
       const falta = Math.max(0, proximaEm - agora);
@@ -1196,32 +1200,53 @@
 
     let ok = true;
 
-    // Status primeiro: a varredura é o que grava a transição e a amostra de
-    // latência, então o painel lido depois dela já as contém.
-    try {
-      const data = await fetchStatus();
+    function aplicarStatus(data) {
       const results = data.services;
       results.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
       updateBanner(results);
       const t = Date.parse(data.checkedAt);
       ultimaVarredura = Number.isFinite(t) ? t : null;
-    } catch (e) {
-      ok = false;
-      // Sem resposta NÃO é "tudo offline": as linhas mantêm o último estado
-      // conhecido e a idade dele segue visível. Se nunca houve estado, o
-      // banner diz que não sabe — em vez de pintar treze serviços de vermelho.
-      if (ultimaVarredura == null) showBannerUnknown();
+      retratoAtrasado = !!(data.retrato && data.retrato.atrasado);
     }
 
-    try {
-      const painel = await fetchPainel();
+    async function lerStatus() {
+      try {
+        aplicarStatus(await fetchStatus());
+      } catch (e) {
+        ok = false;
+        // Sem resposta NÃO é "tudo offline": as linhas mantêm o último estado
+        // conhecido e a idade dele segue visível. Se nunca houve estado, o
+        // banner diz que não sabe — em vez de pintar treze serviços de vermelho.
+        if (ultimaVarredura == null) showBannerUnknown();
+      }
+    }
+
+    function aplicarPainel(painel) {
       applyThirdParty(painel.terceiros);
       renderQuotas(painel.cotas);
       renderHistory(painel.historico);
       applyServiceHistory(painel.historico);
       renderLatency(painel.latencia);
-    } catch (e) {
-      ok = false;
+    }
+
+    // Com o retrato compartilhado (D1), o painel já traz o status LIDO — uma
+    // chamada só, e nenhuma varredura. Sem ele, o status vem do /api/status
+    // ANTES do painel: é a varredura que grava a transição, então o painel lido
+    // depois já a contém.
+    if (modoRetrato !== false) {
+      try {
+        const painel = await fetchPainel();
+        modoRetrato = !!painel.retratoCompartilhado;
+        if (modoRetrato && painel.status && Array.isArray(painel.status.services)) aplicarStatus(painel.status);
+        else await lerStatus();
+        aplicarPainel(painel);
+      } catch (e) {
+        ok = false;
+        if (ultimaVarredura == null) showBannerUnknown();
+      }
+    } else {
+      await lerStatus();
+      try { aplicarPainel(await fetchPainel()); } catch (e) { ok = false; }
     }
 
     falhasSeguidas = ok ? 0 : falhasSeguidas + 1;
