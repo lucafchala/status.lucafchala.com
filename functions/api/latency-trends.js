@@ -151,15 +151,14 @@ export function summarize(entries) {
   return out;
 }
 
-export async function onRequestGet(context) {
-  const KV = context.env.STATUS_KV;
-
+// Usada também pelo /api/painel. Devolve o objeto, não a Response.
+export async function resumoLatencia(KV) {
   if (!KV) {
-    return json({
+    return {
       available: false,
       detail: 'STATUS_KV ausente — latência não é registrada',
       entries: [], services: {}, checkedAt: new Date().toISOString(),
-    });
+    };
   }
 
   const entries = await readLatency(KV);
@@ -171,7 +170,7 @@ export async function onRequestGet(context) {
     .map(([name, v]) => ({ name, deltaPct: v.trend.deltaPct, p50: v.p50 }))
     .sort((a, b) => b.deltaPct - a.deltaPct);
 
-  return json({
+  return {
     available: true,
     windowHours: LATENCY_WINDOW_MS / 3600_000,
     intervalMinutes: LATENCY_INTERVAL_MS / 60_000,
@@ -182,7 +181,11 @@ export async function onRequestGet(context) {
     // segunda ida ao servidor.
     entries,
     checkedAt: new Date().toISOString(),
-  });
+  };
+}
+
+export async function onRequestGet(context) {
+  return json(await resumoLatencia(context.env.STATUS_KV));
 }
 
 function json(data) {

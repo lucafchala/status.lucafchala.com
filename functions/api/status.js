@@ -700,7 +700,7 @@ async function checkService(svc, env) {
 // O piso fecha a porta sem tirar a chave do cron: um pedido que fura o cache de
 // borda recebe o resultado da última varredura DESTE isolate se ela for recente
 // demais, em vez de disparar outra. O cron roda a cada 10 min e nunca esbarra
-// nisso; o painel aberto (que pede a cada 60 s) também não. Só o laço de curl
+// nisso; o painel aberto (que pede a cada 2–10 min) também não. Só o laço de curl
 // esbarra — que é exatamente quem deveria.
 //
 // Estado de módulo, então vale por isolate: um atacante distribuído ainda
@@ -941,7 +941,7 @@ export async function detectAndNotify(env, services, origin) {
     try { onCooldown = !!(await KV.get(`notify_sent:${t.name}`)); } catch { onCooldown = false; }
     // Cooldown que não pôde ser GRAVADO não protege nada: sem este segundo
     // olhar, uma cota estourada faria a mesma transição render e-mail a cada
-    // varredura (a cada 10 min pelo cron, a cada 60 s com o painel aberto).
+    // varredura (a cada disparo do cron, a cada poucos minutos com o painel aberto).
     if (!onCooldown) {
       const last = _fallback.notifiedAt.get(t.name);
       if (last && now - last < NOTIFY_COOLDOWN_S * 1000) onCooldown = true;

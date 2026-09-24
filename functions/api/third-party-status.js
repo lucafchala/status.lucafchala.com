@@ -147,22 +147,40 @@ async function checkOne(svc) {
   }
 }
 
-// Edge-cached for 30 s so concurrent viewers share one upstream sweep per colo
-// instead of fanning out 6 fetches per tab per minute.
-export async function onRequestGet(context) {
-  const cache = caches.default;
-  const cacheKey = new Request(context.request.url);
-  const hit = await cache.match(cacheKey);
-  if (hit) return hit;
+// Cache de borda de 2 min, compartilhado por colo. A página de status de um
+// provedor muda na escala de minutos (é gente escrevendo um incidente), então
+// 30 s só multiplicava as idas aos provedores sem mostrar nada mais novo.
+//
+// A chave é FIXA, não a URL do pedido: com a URL inteira, `?x=<aleatório>`
+// furava o cache e cada pedido virava 5–6 fetches de saída — a mesma porta de
+// amplificação que o /api/status fecha com o piso por isolate.
+export const TERCEIROS_CACHE_S = 120;
 
-  const results = await Promise.all(SERVICES.map(checkOne));
-  const res = new Response(JSON.stringify({ services: results }), {
+function json(data) {
+  return new Response(JSON.stringify(data), {
     headers: {
       'Content-Type': 'application/json',
+      'X-Content-Type-Options': 'nosniff',
       // s-maxage caches at the edge only; max-age=0 keeps browsers revalidating
-      'Cache-Control': 'public, max-age=0, s-maxage=30',
+      'Cache-Control': `public, max-age=0, s-maxage=${TERCEIROS_CACHE_S}`,
     },
   });
-  context.waitUntil(cache.put(cacheKey, res.clone()));
-  return res;
+}
+
+// Usada também pelo /api/painel, que junta tudo o que a página lê numa
+// chamada só. Devolve o objeto, não a Response, para poder ser composta.
+export async function verificarTerceiros(context) {
+  const cache = caches.default;
+  const cacheKey = new Request(new URL(context.request.url).origin + '/api/third-party-status');
+  const hit = await cache.match(cacheKey);
+  if (hit) return hit.json();
+
+  const results = await Promise.all(SERVICES.map(checkOne));
+  const body = { services: results, checkedAt: new Date().toISOString() };
+  context.waitUntil(cache.put(cacheKey, json(body)));
+  return body;
+}
+
+export async function onRequestGet(context) {
+  return json(await verificarTerceiros(context));
 }

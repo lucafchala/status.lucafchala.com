@@ -548,6 +548,7 @@
       color: var(--muted);
       letter-spacing: 0.06em;
     }
+    .last-checked .stale { color: var(--degraded); }
     .act-btn {
       background: none;
       border: 1px solid var(--border);
@@ -680,7 +681,7 @@
 
   <div class="refresh-row">
     <span class="last-checked" id="last-checked">–</span>
-    <button class="act-btn" id="btn-refresh" onclick="runChecks()">↻ verificar agora</button>
+    <button class="act-btn" id="btn-refresh" onclick="runChecks(true)">↻ atualizar</button>
   </div>
 
   <div class="subscribe-wrap" id="subscribe-wrap">
@@ -738,56 +739,76 @@
     { name: 'Google Fonts', page: 'https://status.cloud.google.com' },
   ];
 
-  const REFRESH_INTERVAL_MS = 60000;
+  // Cadência. O dado que a página mostra muda quando uma varredura roda, e o
+  // agendador varre a cada 10 min. Pedir a cada 60 s — como era — pagava dez
+  // vezes pela mesma resposta, com a aba visível ou não: uma aba esquecida
+  // aberta eram ~7.200 invocações de Pages Function e ~24 mil requisições no
+  // Worker do fotos por dia. Agora a próxima atualização mira o momento em que
+  // a próxima varredura deve ter acontecido, entre 2 e 10 min, e pausa com a
+  // aba escondida.
+  const INTERVALO_AGENDADOR_MS = 10 * 60000;
+  const FOLGA_AGENDADOR_MS = 30000;
+  const ATUALIZA_MIN_MS = 2 * 60000;
+  const ATUALIZA_MAX_MS = 10 * 60000;
+  // Falha seguida dobra a espera (2, 4, 8… até 30 min). Um painel que martela
+  // um servidor que não responde só piora o incidente que está mostrando.
+  const BACKOFF_MAX_MS = 30 * 60000;
+  // O botão manual não fura esse piso: é o mesmo dado de 30 s atrás.
+  const MANUAL_PISO_MS = 30000;
 
   let refreshTimer = null;
+  let ageTimer = null;
   let checking = false;
+  let falhasSeguidas = 0;
+  let ultimaAtualizacao = 0;     // relógio do navegador, fim da última tentativa
+  let ultimaVarredura = null;    // checkedAt da última varredura recebida (ms)
+  let proximaEm = null;          // quando a próxima atualização está marcada (ms)
 
-  async function fetchThirdPartyStatus() {
-    try {
-      const res = await fetch('/api/third-party-status', { cache: 'no-store' });
-      const json = await res.json();
-      return json.services; // [{ name, page, status, description }]
-    } catch {
-      return THIRD_PARTY.map(s => ({ ...s, status: 'down', description: '' }));
-    }
+  // Resposta que não é 2xx, ou corpo que não é JSON, conta como falha — não
+  // como "tudo offline". Quem não conseguiu perguntar não sabe a resposta.
+  async function getJson(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
   }
 
   async function fetchStatus() {
-    try {
-      const res = await fetch('/api/status', { cache: 'no-store' });
-      const json = await res.json();
-      return json.services;
-    } catch {
-      return SERVICES.map(s => ({ ...s, status: 'down', rt: 0 }));
+    const json = await getJson('/api/status');
+    if (!json || !Array.isArray(json.services)) throw new Error('resposta sem services');
+    return json;
+  }
+
+  // Terceiros, cotas, histórico e latência numa chamada (functions/api/painel.js).
+  async function fetchPainel() {
+    return getJson('/api/painel');
+  }
+
+  // Quanto esperar até a próxima atualização.
+  function proximaEspera(agora) {
+    if (falhasSeguidas > 0) {
+      return Math.min(ATUALIZA_MIN_MS * Math.pow(2, falhasSeguidas - 1), BACKOFF_MAX_MS);
     }
+    if (ultimaVarredura == null) return ATUALIZA_MAX_MS;
+    const alvo = ultimaVarredura + INTERVALO_AGENDADOR_MS + FOLGA_AGENDADOR_MS;
+    return Math.min(ATUALIZA_MAX_MS, Math.max(ATUALIZA_MIN_MS, alvo - agora));
   }
 
-  async function fetchQuotaStats() {
-    try {
-      const res = await fetch('/api/quota-stats', { cache: 'no-store' });
-      return await res.json();
-    } catch { return null; }
-  }
-
-  async function fetchHistory() {
-    try {
-      const res = await fetch('/api/status-history', { cache: 'no-store' });
-      return await res.json();
-    } catch { return null; }
-  }
-
-  async function fetchLatency() {
-    try {
-      const res = await fetch('/api/latency-trends', { cache: 'no-store' });
-      return await res.json();
-    } catch { return null; }
+  function agendar() {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+    // Aba escondida não agenda nada: ninguém está olhando, e quem voltar
+    // recebe uma atualização na hora (ver visibilitychange no fim).
+    if (document.hidden) { proximaEm = null; return; }
+    const espera = proximaEspera(Date.now());
+    proximaEm = Date.now() + espera;
+    refreshTimer = setTimeout(runChecks, espera);
   }
 
   function statusLabel(s) {
     if (s === 'up') return 'online';
     if (s === 'degraded') return 'lento';
-    return 'offline';
+    if (s === 'down') return 'offline';
+    return 'sem dados';
   }
 
   function fmtNum(n) {
@@ -933,6 +954,14 @@
     const section = document.getElementById('quota-section');
     const panel   = document.getElementById('quota-panel');
     if (!section || !panel) return;
+    // Seção que o servidor não conseguiu ler aparece dizendo isso. Sumir
+    // seria o painel ficar com cara de "sem problema de cota" justamente
+    // quando ninguém sabe.
+    if (data && data.erro) {
+      section.hidden = false;
+      panel.innerHTML = `<div class="panel-empty">cotas não lidas agora — ${esc(data.erro)}</div>`;
+      return;
+    }
     if (!data || !data.configured) { section.hidden = true; return; }
     section.hidden = false;
 
@@ -1119,60 +1148,106 @@
     sub.textContent = `${up}/${results.length} ok`;
   }
 
-  function updateLastChecked() {
-    const el = document.getElementById('last-checked');
-    const now = new Date();
-    el.textContent = `verificado às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  // Idade do dado, não hora do pedido. "verificado às 14:02:10" com a hora do
+  // navegador dizia quando a PÁGINA perguntou; o que importa é quando a
+  // varredura rodou, que pode ter sido minutos antes (cache de borda, piso por
+  // isolate, agendador). Atualizado localmente a cada 30 s, sem rede.
+  function fmtIdade(ms) {
+    if (ms < 60000) return 'agora há pouco';
+    return 'há ' + fmtAge(ms);
   }
 
-  async function runChecks() {
+  function updateLastChecked() {
+    const el = document.getElementById('last-checked');
+    if (!el) return;
+    const agora = Date.now();
+    const partes = [];
+    if (ultimaVarredura != null) {
+      // Relógio do navegador adiantado não pode produzir idade negativa.
+      const idade = Math.max(0, agora - ultimaVarredura);
+      const quando = new Date(ultimaVarredura);
+      partes.push('verificado <time datetime="' + quando.toISOString() + '" title="' +
+        esc(quando.toLocaleString('pt-BR')) + '">' + fmtIdade(idade) + '</time>');
+    } else {
+      partes.push('ainda sem verificação');
+    }
+    if (falhasSeguidas > 0) {
+      partes.push('<span class="stale">sem resposta do servidor</span>');
+    }
+    if (proximaEm != null) {
+      const falta = Math.max(0, proximaEm - agora);
+      partes.push('próxima atualização em ' + (falta < 60000 ? 'menos de 1min' : fmtAge(falta)));
+    } else if (document.hidden) {
+      partes.push('pausado (aba em segundo plano)');
+    }
+    el.innerHTML = partes.join(' · ');
+  }
+
+  async function runChecks(manual) {
     if (checking) return;
+    // Evento de clique chega como argumento: só `true` explícito é manual.
+    if (manual === true && Date.now() - ultimaAtualizacao < MANUAL_PISO_MS) return;
     checking = true;
+    clearTimeout(refreshTimer);
 
     const btn = document.getElementById('btn-refresh');
     btn.disabled = true;
-    btn.textContent = '↻ verificando…';
+    btn.textContent = '↻ atualizando…';
 
-    document.getElementById('banner-dot').className = 'status-dot checking';
-    document.getElementById('banner-text').textContent = 'Verificando serviços…';
-    document.getElementById('banner-sub').textContent = '';
+    let ok = true;
 
-    // Reset dots to checking
-    SERVICES.forEach((_, i) => {
-      const dot = document.getElementById(`dot-${i}`);
-      if (dot) dot.className = 'status-dot checking';
-    });
-    THIRD_PARTY.forEach((_, i) => {
-      const dot = document.getElementById(`tp-dot-${i}`);
-      if (dot) dot.className = 'status-dot checking';
-    });
+    // Status primeiro: a varredura é o que grava a transição e a amostra de
+    // latência, então o painel lido depois dela já as contém.
+    try {
+      const data = await fetchStatus();
+      const results = data.services;
+      results.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
+      updateBanner(results);
+      const t = Date.parse(data.checkedAt);
+      ultimaVarredura = Number.isFinite(t) ? t : null;
+    } catch (e) {
+      ok = false;
+      // Sem resposta NÃO é "tudo offline": as linhas mantêm o último estado
+      // conhecido e a idade dele segue visível. Se nunca houve estado, o
+      // banner diz que não sabe — em vez de pintar treze serviços de vermelho.
+      if (ultimaVarredura == null) showBannerUnknown();
+    }
 
-    // Check all in parallel server-side — avoids browser DNS cache / CORS issues.
-    // Rows are matched by service name so client/server array order can differ.
-    const [[results]] = await Promise.all([
-      fetchStatus().then(svcs => { svcs.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r)); return [svcs]; }),
-      fetchThirdPartyStatus().then(svcs => svcs.forEach(r => updateThirdPartyRow(THIRD_PARTY.findIndex(s => s.name === r.name), r))),
-      fetchQuotaStats().then(renderQuotas),
-    ]);
+    try {
+      const painel = await fetchPainel();
+      applyThirdParty(painel.terceiros);
+      renderQuotas(painel.cotas);
+      renderHistory(painel.historico);
+      applyServiceHistory(painel.historico);
+      renderLatency(painel.latencia);
+    } catch (e) {
+      ok = false;
+    }
 
-    updateBanner(results);
-    updateLastChecked();
-
-    // Fetched after /api/status rather than alongside it: that sweep is what
-    // records a transition *and* the latency sample, so asking first would show
-    // both one cycle stale.
-    const [history, latency] = await Promise.all([fetchHistory(), fetchLatency()]);
-    renderHistory(history);
-    applyServiceHistory(history);
-    renderLatency(latency);
+    falhasSeguidas = ok ? 0 : falhasSeguidas + 1;
+    ultimaAtualizacao = Date.now();
 
     btn.disabled = false;
-    btn.textContent = '↻ verificar agora';
+    btn.textContent = '↻ atualizar';
     checking = false;
 
-    // Schedule next auto-refresh
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(runChecks, REFRESH_INTERVAL_MS);
+    agendar();
+    updateLastChecked();
+  }
+
+  function showBannerUnknown() {
+    document.getElementById('banner-dot').className = 'status-dot';
+    document.getElementById('banner-text').textContent = 'Sem resposta do servidor de status';
+    document.getElementById('banner-sub').textContent = 'estado desconhecido';
+  }
+
+  // Terceiros: seção ilegível vira "sem dados" em cada linha, não "offline".
+  function applyThirdParty(data) {
+    const svcs = data && Array.isArray(data.services) ? data.services : null;
+    THIRD_PARTY.forEach((s, i) => {
+      const r = svcs && svcs.find(x => x.name === s.name);
+      updateThirdPartyRow(i, r || { status: 'unknown', description: '' });
+    });
   }
 
   function toggleTheme() {
@@ -1247,9 +1322,27 @@
     document.getElementById('btn-theme').textContent = t === 'dark' ? 'light' : 'dark';
   } catch(e) {}
 
+  // Aba escondida: nada de rede. Ao voltar, atualiza na hora se o último dado
+  // já tem mais que o intervalo mínimo; senão só retoma o agendamento.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
+      proximaEm = null;
+      clearInterval(ageTimer);
+      ageTimer = null;
+      updateLastChecked();
+      return;
+    }
+    if (!ageTimer) ageTimer = setInterval(updateLastChecked, 30000);
+    if (Date.now() - ultimaAtualizacao >= ATUALIZA_MIN_MS) runChecks();
+    else { agendar(); updateLastChecked(); }
+  });
+
   // Render and kick off checks
   renderSkeletons();
   renderThirdPartySkeletons();
+  ageTimer = setInterval(updateLastChecked, 30000);
   runChecks();
 </script>
 </body>
