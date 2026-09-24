@@ -115,7 +115,9 @@ describe('POST /api/subscribe', () => {
       env: { RESEND_API_KEY: 'k', STATUS_KV: kv },
     });
     assert.equal(res.status, 200);
-    assert.equal((await res.json()).already, true);
+    // Mesma resposta de um endereço novo: dizer "já inscrito" contaria a quem
+    // sonda quem está na lista.
+    assert.deepEqual(await res.json(), { ok: true, pending: true });
     assert.equal(kv.writes, 0);
   });
 

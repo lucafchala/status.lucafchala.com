@@ -12,7 +12,7 @@ name: monitor
 #     falha, e esse é o alarme do alarme;
 #   • sem o agendador implantado (ou sem STATUS_DB), é ele o agendador, como
 #     sempre foi.
-# A lógica está em scripts/vigia.mjs, com teste em tests/vigia.test.mjs.
+# A lógica está em scripts/vigia.mjs, com teste em tests/agendador.test.mjs.
 #
 # O cron do GitHub NÃO é pontual: em setembro de 2026, agendado a cada 10 min,
 # rodou 5 a 8 vezes por dia (#38). Como vigia isso basta; como agendador,

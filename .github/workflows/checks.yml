@@ -8,6 +8,9 @@ on:
   schedule:
     - cron: '23 9 * * 1'
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -41,6 +44,24 @@ jobs:
         # (repositório público) e reprova se status.js ler um campo que o
         # contrato não tem, ou se o número do contrato mudou.
         run: node --test tests/*.test.mjs
+
+      - name: No inline scripts or handlers (CSP is script-src 'self')
+        run: |
+          python3 - <<'PY'
+          import re, glob, sys
+          bad = []
+          for p in glob.glob('*.html'):
+              html = open(p, encoding='utf-8').read()
+              for m in re.finditer(r'<script\b([^>]*)>(.*?)</script>', html, re.S):
+                  if 'src=' not in m.group(1) and m.group(2).strip(): bad.append(f'{p}: inline <script>')
+                  if 'src=' in m.group(1) and 'data-cfasync="false"' not in m.group(1): bad.append(f'{p}: <script> without data-cfasync="false" (Rocket Loader)')
+              bad += [f'{p}: inline handler {h}' for h in re.findall(r'\s(on[a-z]+)=', html)]
+          if bad: print('\n'.join(bad)); sys.exit(1)
+          print('No inline scripts or handlers; every script opts out of Rocket Loader.')
+          PY
+
+      - name: Status-monitor marker present
+        run: grep -q 'monitoramento de serviços' index.html || { echo "SERVICES → Status looks for 'monitoramento de serviços' on this page"; exit 1; }
 
       - name: JS module syntax check (functions)
         run: |

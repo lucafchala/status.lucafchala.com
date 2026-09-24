@@ -147,19 +147,21 @@ function sumOf(rows, field) {
 async function collectUsage(token, accountTag) {
   const w = utcDayWindow();
   const usage = {};
+  // O texto cru do erro da API vai para o log; o payload (público) leva o
+  // conjunto de dados e um motivo classificado.
   const errors = [];
 
   const agora = new Date();
   const ontem = new Date(agora.getTime() - 24 * 3600_000);
   const [kvOps, kvStore, workers, d1, hora, dobj, pages] = await Promise.all([
-    gql(token, accountTag, Q_KV_OPS, { since: w.since, until: w.until }).catch(e => { errors.push(`KV ops: ${e.message}`); return null; }),
-    gql(token, accountTag, Q_KV_STORAGE, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(`KV storage: ${e.message}`); return null; }),
-    gql(token, accountTag, Q_WORKERS, { since: w.since, until: w.until }).catch(e => { errors.push(`Workers: ${e.message}`); return null; }),
-    gql(token, accountTag, Q_D1, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(`D1: ${e.message}`); return null; }),
+    gql(token, accountTag, Q_KV_OPS, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('KV ops', e)); return null; }),
+    gql(token, accountTag, Q_KV_STORAGE, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(motivo('KV storage', e)); return null; }),
+    gql(token, accountTag, Q_WORKERS, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('Workers', e)); return null; }),
+    gql(token, accountTag, Q_D1, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(motivo('D1', e)); return null; }),
     gql(token, accountTag, Q_WORKER_HORA, { since: ontem.toISOString(), until: agora.toISOString(), script: WORKER_DETALHADO })
-      .catch(e => { errors.push(`${WORKER_DETALHADO} por hora: ${e.message}`); return null; }),
-    gql(token, accountTag, Q_DO, { since: w.since, until: w.until }).catch(e => { errors.push(`Durable Objects: ${e.message}`); return null; }),
-    gql(token, accountTag, Q_PAGES, { since: w.since, until: w.until }).catch(e => { errors.push(`Pages Functions: ${e.message}`); return null; }),
+      .catch(e => { errors.push(motivo(`${WORKER_DETALHADO} por hora`, e)); return null; }),
+    gql(token, accountTag, Q_DO, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('Durable Objects', e)); return null; }),
+    gql(token, accountTag, Q_PAGES, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('Pages Functions', e)); return null; }),
   ]);
 
   if (kvOps) {
@@ -328,6 +330,15 @@ function buildQuotas(usage) {
 }
 
 // Usada também pelo /api/painel. Devolve o objeto, não a Response.
+function motivo(rotulo, e) {
+  console.error(`quota-stats: ${rotulo}:`, e);
+  const m = String(e && e.message || '');
+  const why = /unauthori|permission|forbidden|authentication|\b40[13]\b/i.test(m) ? 'sem permissão no token'
+    : /timeout|timed out|abort/i.test(m) ? 'tempo esgotado'
+    : 'a API não respondeu';
+  return `${rotulo}: ${why}`;
+}
+
 export async function lerCotas(context) {
   const { env } = context;
   const token = env.CF_API_TOKEN;
@@ -351,7 +362,7 @@ export async function lerCotas(context) {
   if (hit) return hit.json();
 
   const [usageResult, certs] = await Promise.all([
-    collectUsage(token, accountTag).catch(e => ({ usage: {}, errors: [e.message] })),
+    collectUsage(token, accountTag).catch(e => ({ usage: {}, errors: [motivo('uso da conta', e)] })),
     collectCerts(token, accountTag).catch(e => [{ zone: '—', status: 'unknown', detail: `não verificado (${e.message})` }]),
   ]);
 

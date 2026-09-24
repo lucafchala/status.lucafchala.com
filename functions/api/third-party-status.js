@@ -1,42 +1,53 @@
 // GitHub, Anthropic → Atlassian Statuspage JSON API
 // Cloudflare → Atlassian components API filtered to Brazil (GRU/São Paulo) PoPs
 // Resend → try Atlassian API first; fall back to connectivity check
-// Google → Google Cloud Status JSON (different format)
+// Google Drive → Google Workspace Status Dashboard (incidents.json)
+//
+// "Sem dados" (`unknown`) é a resposta honesta quando a página de status do
+// provedor não respondeu ou respondeu algo ilegível: não sabemos. Antes isso
+// virava verde (403/404/JSON inválido) ou vermelho (timeout) — os dois
+// afirmavam algo que ninguém verificou.
+//
+// Google Fonts saiu: o ecossistema hospeda as próprias fontes. Drive continua
+// porque o fotos entrega as fotos por links do Drive — mas pelo feed do
+// Workspace, que é onde o Drive aparece (o feed do Google Cloud não o cobre).
 const SERVICES = [
   { name: 'GitHub',       api: 'https://www.githubstatus.com/api/v2/status.json',     page: 'https://www.githubstatus.com' },
   { name: 'Cloudflare',   cloudflare: true,                                            page: 'https://www.cloudflarestatus.com' },
   { name: 'Claude',       api: 'https://status.anthropic.com/api/v2/status.json',     page: 'https://status.anthropic.com' },
   { name: 'Resend',       api: 'https://status.resend.com/api/v2/status.json', fallbackUrl: 'https://resend.com', page: 'https://status.resend.com' },
-  { name: 'Google Drive', googleCloud: true, product: 'Google Drive',                 page: 'https://workspace.google.com/status' },
-  { name: 'Google Fonts', googleCloud: true, product: 'Google Fonts',                 page: 'https://status.cloud.google.com' },
+  { name: 'Google Drive', google: 'https://www.google.com/appsstatus/dashboard/incidents.json', product: 'Google Drive', page: 'https://www.google.com/appsstatus/dashboard/' },
 ];
 
-const GOOGLE_STATUS_URL = 'https://status.cloud.google.com/incidents.json';
-
 // Atlassian component status → our status
-function componentStatus(status) {
+export function componentStatus(status) {
   if (!status || status === 'operational') return 'up';
   if (status === 'degraded_performance' || status === 'partial_outage' || status === 'under_maintenance') return 'degraded';
-  return 'down'; // major_outage
+  if (status === 'major_outage') return 'down';
+  return 'unknown';
 }
 
-function atlassianStatus(json) {
+// `maintenance` é o indicador de manutenção em andamento: não é incidente, mas
+// também não é "tudo normal" para quem depende do serviço naquele momento.
+export function atlassianStatus(json) {
   const ind = json?.status?.indicator;
   const description = json?.status?.description || '';
-  if (!ind || ind === 'none') return { status: 'up', description };
-  if (ind === 'minor') return { status: 'degraded', description };
-  return { status: 'down', description };
+  if (ind === 'none') return { status: 'up', description };
+  if (ind === 'minor' || ind === 'maintenance') return { status: 'degraded', description };
+  if (ind === 'major' || ind === 'critical') return { status: 'down', description };
+  return { status: 'unknown', description: 'resposta sem indicador' };
 }
 
 // Filter Cloudflare components to Brazil PoPs (GRU = São Paulo)
-async function checkCloudflare(page) {
+async function checkCloudflare() {
   const res = await fetch('https://www.cloudflarestatus.com/api/v2/components.json', {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) { res.body?.cancel(); return { status: 'unknown', description: `HTTP ${res.status}` }; }
   const json = await res.json();
-  const components = json?.components || [];
+  const components = json?.components;
+  if (!Array.isArray(components)) return { status: 'unknown', description: 'resposta ilegível' };
 
   // Match Brazil data centers: name contains "Brazil", "GRU", or "São Paulo"
   const brazil = components.filter(c => {
@@ -46,15 +57,13 @@ async function checkCloudflare(page) {
 
   if (brazil.length === 0) {
     // No Brazil-specific components found; fall back to overall status
-    const overall = json?.page?.status_indicator || 'none';
-    return { status: componentStatus(overall), description: 'Brazil PoP data unavailable' };
+    return { ...atlassianStatus({ status: { indicator: json?.status?.indicator } }), description: 'Brazil PoP data unavailable' };
   }
 
   // Worst status among matched Brazil components
-  const statuses = brazil.map(c => c.status);
   let worst = 'up';
-  for (const s of statuses) {
-    const mapped = componentStatus(s);
+  for (const c of brazil) {
+    const mapped = componentStatus(c.status);
     if (mapped === 'down') { worst = 'down'; break; }
     if (mapped === 'degraded') worst = 'degraded';
   }
@@ -67,83 +76,67 @@ async function checkCloudflare(page) {
   return { status: worst, description };
 }
 
-let googleCache = null;
-let googleCacheAt = 0;
-
-async function fetchGoogleCloud() {
-  if (googleCache && Date.now() - googleCacheAt < 5000) return googleCache;
-  const res = await fetch(GOOGLE_STATUS_URL, {
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(8000),
+// Os feeds do Google (Cloud e Workspace) listam incidentes ANTIGOS também; o
+// que ainda está aberto é o que não tem `end`. Sem esse filtro, qualquer
+// incidente dos últimos meses deixava a linha vermelha para sempre.
+export function googleStatus(incidents, product) {
+  if (!Array.isArray(incidents)) return { status: 'unknown', description: 'resposta ilegível' };
+  const alvo = product.toLowerCase();
+  const active = incidents.filter(inc => {
+    if (!inc || inc.end) return false;
+    const affected = (inc.affected_products || []).map(p => (p.title || '').toLowerCase());
+    return affected.includes(alvo);
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  googleCache = await res.json();
-  googleCacheAt = Date.now();
-  return googleCache;
+  if (active.length === 0) return { status: 'up', description: 'Sem incidentes abertos' };
+  // status_impact: SERVICE_INFORMATION | SERVICE_DISRUPTION | SERVICE_OUTAGE
+  const pior = active.some(i => i.status_impact === 'SERVICE_OUTAGE' || i.severity === 'high') ? 'down' : 'degraded';
+  const titulo = String(active[0].external_desc || 'Incidente em andamento')
+    .replace(/\*\*Title:\*\*\s*/i, '').split('\n').map(l => l.trim()).find(Boolean) || 'Incidente em andamento';
+  return { status: pior, description: titulo.slice(0, 140) };
 }
 
-function googleCloudStatus(incidents, product) {
-  if (!Array.isArray(incidents)) return { status: 'up', description: 'All Systems Operational' };
-  const active = incidents.filter(inc => {
-    const affected = (inc.affected_products || []).map(p => (p.title || p.id || '').toLowerCase());
-    return affected.some(p => p.includes(product.toLowerCase().split(' ')[1]));
-  });
-  if (active.length === 0) return { status: 'up', description: 'All Systems Operational' };
-  const severity = active[0].severity || 'medium';
-  return {
-    status: severity === 'low' ? 'degraded' : 'down',
-    description: active[0].external_desc || 'Service disruption',
-  };
+async function checkGoogle(url, product) {
+  const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+  if (!res.ok) { res.body?.cancel(); return { status: 'unknown', description: `HTTP ${res.status}` }; }
+  let incidents;
+  try { incidents = JSON.parse(await res.text()); } catch { return { status: 'unknown', description: 'resposta ilegível' }; }
+  return googleStatus(incidents, product);
 }
 
 async function connectivityCheck(url, name, page) {
   try {
     const res = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(8000) });
-    return { name, page, status: res.status >= 500 ? 'down' : 'up', description: '' };
+    res.body?.cancel();
+    return { name, page, status: res.status >= 500 ? 'down' : 'up', description: 'página de status indisponível; site responde' };
   } catch {
-    return { name, page, status: 'down', description: '' };
+    return { name, page, status: 'unknown', description: 'sem resposta' };
   }
 }
 
-async function checkOne(svc) {
-  if (svc.cloudflare) {
-    try {
-      const { status, description } = await checkCloudflare(svc.page);
-      return { name: svc.name, page: svc.page, status, description };
-    } catch {
-      return { name: svc.name, page: svc.page, status: 'down', description: '' };
-    }
-  }
-  if (svc.googleCloud) {
-    try {
-      const incidents = await fetchGoogleCloud();
-      const { status, description } = googleCloudStatus(incidents, svc.product);
-      return { name: svc.name, page: svc.page, status, description };
-    } catch {
-      return { name: svc.name, page: svc.page, status: 'down', description: '' };
-    }
-  }
+export async function checkOne(svc) {
+  const base = { name: svc.name, page: svc.page };
   try {
+    if (svc.cloudflare) return { ...base, ...(await checkCloudflare()) };
+    if (svc.google) return { ...base, ...(await checkGoogle(svc.google, svc.product)) };
+
     const res = await fetch(svc.api, {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(8000),
     });
-    if (res.status === 404 || res.status === 403) {
+    if (!res.ok) {
+      res.body?.cancel();
       if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
-      return { name: svc.name, page: svc.page, status: 'up', description: '' };
+      return { ...base, status: 'unknown', description: `HTTP ${res.status}` };
     }
-    if (!res.ok) return { name: svc.name, page: svc.page, status: 'degraded', description: `HTTP ${res.status}` };
-    const text = await res.text();
     let json;
-    try { json = JSON.parse(text); } catch {
+    try { json = JSON.parse(await res.text()); } catch {
       if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
-      return { name: svc.name, page: svc.page, status: 'up', description: '' };
+      return { ...base, status: 'unknown', description: 'resposta ilegível' };
     }
-    const { status, description } = atlassianStatus(json);
-    return { name: svc.name, page: svc.page, status, description };
+    return { ...base, ...atlassianStatus(json) };
   } catch {
     if (svc.fallbackUrl) return connectivityCheck(svc.fallbackUrl, svc.name, svc.page);
-    return { name: svc.name, page: svc.page, status: 'down', description: '' };
+    return { ...base, status: 'unknown', description: 'sem resposta' };
   }
 }
 

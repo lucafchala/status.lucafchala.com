@@ -12,41 +12,41 @@
   <link rel="preload" as="font" type="font/woff2" href="/fonts/jetbrains-mono-latin-wght-normal.18be452724.woff2" crossorigin />
   <link rel="preload" as="font" type="font/woff2" href="/fonts/cormorant-garamond-latin-wght-normal.d80df8ff5a.woff2" crossorigin />
   <link rel="stylesheet" href="/app.css" />
-  <script src="/tema.js"></script>
+  <script src="/tema.js" data-cfasync="false"></script>
 </head>
 <body>
 
-<a class="pular" href="#servicos">Pular para os serviços</a>
+<a class="pular" href="#servicos" data-i18n="skip">Pular para os serviços</a>
 
 <header class="topo">
   <div class="topo-in">
-    <a class="marca" href="/" aria-label="Status lucafchala.com — início">
+    <a class="marca" href="/" aria-label="Status lucafchala.com — início" data-i18n-attr="aria-label:brand_aria">
       <span class="marca-ponto" aria-hidden="true"></span>
       <span>Status <em>lucafchala.com</em></span>
     </a>
-    <nav class="topo-acoes" aria-label="Ações">
+    <nav class="topo-acoes" aria-label="Ações" data-i18n-attr="aria-label:nav_aria">
       <button class="btn btn-primario" id="btn-inscrever" type="button" data-action="inscrever-abrir"
-              aria-expanded="false" aria-controls="inscricao">Receber alertas</button>
+              aria-expanded="false" aria-controls="inscricao" data-i18n="alerts_btn">Receber alertas</button>
+      <button class="btn btn-fantasma" id="btn-lang" type="button" data-action="idioma" aria-label="Switch to English" lang="en">EN</button>
       <button class="btn btn-fantasma" id="btn-theme" type="button" data-action="tema">claro</button>
-      <a class="btn btn-fantasma" href="https://lucafchala.com">início</a>
+      <a class="btn btn-fantasma" href="https://lucafchala.com" data-i18n="home">início</a>
     </nav>
   </div>
 
   <!-- Inscrição: fechada até alguém pedir. -->
   <div class="inscricao" id="inscricao" hidden>
     <div class="inscricao-in">
-      <p class="inscricao-texto" id="inscricao-texto">
-        Um e-mail quando um serviço cair, ficar degradado ou voltar. Dá para cancelar pelo link de cada mensagem.
-      </p>
-      <div id="sub-form" class="inscricao-form">
-        <label class="sr-only" for="sub-email">Seu e-mail</label>
-        <input type="email" id="sub-email" class="campo" placeholder="seu@email.com" autocomplete="email"
-               aria-describedby="inscricao-texto" />
-        <button class="btn btn-primario" type="button" data-action="inscrever" id="sub-ok-btn">Inscrever</button>
-        <button class="btn btn-fantasma" type="button" data-action="inscrever-fechar">Cancelar</button>
-      </div>
-      <p id="sub-done" class="inscricao-ok" hidden role="status">✓ Alertas ativados.</p>
-      <p id="sub-already" class="inscricao-ok" hidden role="status">✓ Este e-mail já recebe os alertas.</p>
+      <p class="inscricao-texto" id="inscricao-texto" data-i18n="sub_text">Um e-mail quando um serviço cair, ficar degradado ou voltar. Dá para cancelar pelo link de cada mensagem.</p>
+      <form id="sub-form" class="inscricao-form" action="/api/subscribe" method="post" novalidate>
+        <label class="sr-only" for="sub-email" data-i18n="sub_label">Seu e-mail</label>
+        <input type="email" id="sub-email" name="email" class="campo" placeholder="seu@email.com" autocomplete="email" required
+               maxlength="254" aria-describedby="inscricao-texto sub-consent" />
+        <button class="btn btn-primario" type="submit" id="sub-ok-btn" data-i18n="sub_ok">Inscrever</button>
+        <button class="btn btn-fantasma" type="button" data-action="inscrever-fechar" data-i18n="cancel">Cancelar</button>
+        <div id="sub-turnstile" class="inscricao-turnstile" hidden></div>
+      </form>
+      <p class="inscricao-texto inscricao-consent" id="sub-consent" data-i18n="sub_consent">Guardamos só o endereço, para mandar estes avisos. Nada é salvo antes de você confirmar pelo e-mail; o link de cada mensagem apaga a inscrição.</p>
+      <p id="sub-done" class="inscricao-ok" hidden role="status" data-i18n="sub_pending">✓ Quase lá: se este endereço ainda não estiver inscrito, enviamos um link de confirmação. Ele vale por 24 horas.</p>
       <p id="sub-error" class="inscricao-erro" hidden role="alert"><span id="sub-error-msg">Erro — tente novamente.</span></p>
     </div>
   </div>
@@ -59,7 +59,7 @@
     <div class="faixa estado-checking" id="banner">
       <span class="faixa-icone" id="banner-icone" aria-hidden="true">…</span>
       <div class="faixa-texto">
-        <h1 class="faixa-titulo" id="banner-text">Verificando serviços…</h1>
+        <h1 class="faixa-titulo" id="banner-text" data-i18n="checking_all">Verificando serviços…</h1>
         <p class="faixa-detalhe" id="banner-sub"></p>
       </div>
     </div>
@@ -74,46 +74,46 @@
 
   <section class="secao" id="servicos" aria-labelledby="h-servicos" tabindex="-1">
     <div class="secao-topo">
-      <h2 id="h-servicos">Serviços</h2>
-      <p class="secao-nota" id="barras-legenda">histórico</p>
+      <h2 id="h-servicos" data-i18n="h_services">Serviços</h2>
+      <p class="secao-nota" id="barras-legenda" data-i18n="history">histórico</p>
     </div>
     <div id="services-list"></div>
-    <ul class="legenda" aria-label="Legenda das barras">
-      <li><span class="b-amostra up" aria-hidden="true"></span>operacional</li>
-      <li><span class="b-amostra degraded" aria-hidden="true"></span>degradado</li>
-      <li><span class="b-amostra down" aria-hidden="true"></span>fora do ar</li>
-      <li><span class="b-amostra nd" aria-hidden="true"></span>sem dado</li>
+    <ul class="legenda" aria-label="Legenda das barras" data-i18n-attr="aria-label:legend_aria">
+      <li><span class="b-amostra up" aria-hidden="true"></span><span data-i18n="lg_up">operacional</span></li>
+      <li><span class="b-amostra degraded" aria-hidden="true"></span><span data-i18n="lg_degraded">degradado</span></li>
+      <li><span class="b-amostra down" aria-hidden="true"></span><span data-i18n="lg_down">fora do ar</span></li>
+      <li><span class="b-amostra nd" aria-hidden="true"></span><span data-i18n="lg_nd">sem dado</span></li>
     </ul>
   </section>
 
   <section class="secao" id="incidentes-secao" aria-labelledby="h-incidentes">
     <div class="secao-topo">
-      <h2 id="h-incidentes">Incidentes recentes</h2>
+      <h2 id="h-incidentes" data-i18n="h_incidents">Incidentes recentes</h2>
       <p class="secao-nota">48 h</p>
     </div>
-    <div id="incidentes" class="incidentes"><p class="vazio">carregando…</p></div>
+    <div id="incidentes" class="incidentes"><p class="vazio" data-i18n="loading">carregando…</p></div>
   </section>
 
   <section class="secao" id="latency-section" aria-labelledby="h-latencia" hidden>
     <div class="secao-topo">
-      <h2 id="h-latencia">Tempo de resposta</h2>
-      <p class="secao-nota">48 h · mediana e p95</p>
+      <h2 id="h-latencia" data-i18n="h_latency">Tempo de resposta</h2>
+      <p class="secao-nota" data-i18n="latency_note">48 h · mediana e p95</p>
     </div>
     <div class="painel" id="latency-panel"></div>
   </section>
 
   <section class="secao" aria-labelledby="h-terceiros">
     <div class="secao-topo">
-      <h2 id="h-terceiros">Serviços de terceiros</h2>
-      <p class="secao-nota">de que o ecossistema depende</p>
+      <h2 id="h-terceiros" data-i18n="h_third">Serviços de terceiros</h2>
+      <p class="secao-nota" data-i18n="third_note">de que o ecossistema depende</p>
     </div>
     <ul class="terceiros" id="third-party-list"></ul>
   </section>
 
   <section class="secao" id="quota-section" aria-labelledby="h-cotas" hidden>
     <div class="secao-topo">
-      <h2 id="h-cotas">Cotas da conta Cloudflare</h2>
-      <p class="secao-nota">hoje, janela UTC</p>
+      <h2 id="h-cotas" data-i18n="h_quotas">Cotas da conta Cloudflare</h2>
+      <p class="secao-nota" data-i18n="quotas_note">hoje, janela UTC</p>
     </div>
     <div class="painel" id="quota-panel"></div>
   </section>
@@ -125,9 +125,11 @@
     <span aria-hidden="true"> · </span>
     <a href="mailto:suporte@lucafchala.com">suporte@lucafchala.com</a>
   </p>
-  <p class="rodape-nota" id="rodape-nota">Verificação própria, sem monitor de terceiros.</p>
+  <!-- "monitoramento de serviços" é o marcador que a própria varredura procura
+       nesta página (SERVICES → Status): fica estático, fora do data-i18n. -->
+  <p class="rodape-nota" id="rodape-nota">Verificação própria: monitoramento de serviços sem monitor de terceiros.</p>
 </footer>
 
-<script src="/app.js" defer></script>
+<script src="/app.js" defer data-cfasync="false"></script>
 </body>
 </html>

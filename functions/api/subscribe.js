@@ -68,6 +68,58 @@ function crossSite(request) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Confirmação dupla (double opt-in)
+// ---------------------------------------------------------------------------
+// Antes, o POST já gravava o endereço na lista e mandava "Inscrição
+// confirmada": qualquer pessoa inscrevia o endereço de outra, que passava a
+// receber alertas que nunca pediu. Agora o POST só guarda um PENDENTE (24 h) e
+// manda um link; quem entra na lista é quem abriu a caixa de entrada e clicou
+// (ver confirm.js). É também o que a LGPD pede de um consentimento.
+//
+// A chave do pendente é o hash do endereço, não o token: assim um segundo POST
+// para o mesmo endereço dentro das 24 h não manda outro e-mail — o teto de
+// mensagens por destinatário vale entre isolates, sem escrita extra.
+export const PENDING_TTL_S = 24 * 3600;
+export const pendingKey = (id) => `pending_sub:${id}`;
+
+export async function emailId(email) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+// Turnstile é opcional: só é exigido quando o segredo existe. O GET abaixo diz
+// à página se deve carregar o widget.
+async function turnstileOk(env, token, ip) {
+  if (!env.TURNSTILE_SECRET_KEY) return true;
+  if (!token || typeof token !== 'string' || token.length > 2048) return false;
+  try {
+    const body = new FormData();
+    body.append('secret', env.TURNSTILE_SECRET_KEY);
+    body.append('response', token);
+    if (ip && ip !== 'unknown') body.append('remoteip', ip);
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST', body, signal: AbortSignal.timeout(5000),
+    });
+    const j = await res.json();
+    return j && j.success === true;
+  } catch (e) {
+    console.error('turnstile verify failed', e);
+    return false;
+  }
+}
+
+export async function onRequestGet({ env }) {
+  return json({ turnstile: env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY ? env.TURNSTILE_SITE_KEY : null });
+}
+
+// Resposta única para "enviamos o link", "já tinha um link pendente" e "já é
+// inscrito": diferenciar os três contaria a quem sonda quais endereços estão
+// na lista.
+const PENDENTE = { ok: true, pending: true };
+
+export { crossSite, MAX_SUBSCRIBERS };
+
 export async function onRequestPost({ request, env }) {
   const { RESEND_API_KEY, NOTIFY_TO, NOTIFY_FROM = 'status@lucafchala.com', STATUS_KV: KV } = env;
 
@@ -76,13 +128,17 @@ export async function onRequestPost({ request, env }) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   if (ipThrottled(ip)) return json({ error: 'Muitas tentativas. Tente mais tarde.' }, 429);
 
-  let email;
-  try { ({ email } = await request.json()); } catch {
+  let email, turnstile;
+  try { ({ email, turnstile } = await request.json()); } catch {
     return json({ error: 'JSON inválido' }, 400);
   }
-  email = (email || '').trim().toLowerCase();
+  email = (typeof email === 'string' ? email : '').trim().toLowerCase();
   if (!email || email.length > 254 || !/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/.test(email)) {
     return json({ error: 'Email inválido' }, 400);
+  }
+
+  if (!(await turnstileOk(env, turnstile, ip))) {
+    return json({ error: 'Verificação anti-robô falhou. Recarregue a página e tente de novo.' }, 403);
   }
 
   // ---------------------------------------------------------------------------
@@ -92,7 +148,7 @@ export async function onRequestPost({ request, env }) {
   // ("RESEND_API_KEY ausente", "STATUS_KV ausente"). Isso é reconhecimento de
   // graça para quem sonda o site: conta qual serviço está por trás, o que está
   // configurado e o que não está. Quem precisa do detalhe é o dono — e ele já
-  // tem /api/healthz, que reporta cada binding como booleano, e o log.
+  // tem a linha "configuração de alertas" no próprio painel, e o log.
   if (!RESEND_API_KEY || !KV) {
     console.error(`subscribe indisponível: resendKey=${!!RESEND_API_KEY} kv=${!!KV}`);
     // Aviso ao dono, quando dá: sem isto, uma inscrição perdida por
@@ -104,8 +160,8 @@ export async function onRequestPost({ request, env }) {
         body: JSON.stringify({
           from: NOTIFY_FROM,
           to: [NOTIFY_TO],
-          subject: `Nova inscrição pendente — ${email}`,
-          html: `<p style="font-family:monospace">${esc(email)} quer receber alertas mas STATUS_KV não está configurado. Adicione o binding no Cloudflare Pages.</p>`,
+          subject: 'Inscrição perdida — status.lucafchala.com',
+          html: `<p style="font-family:monospace">Alguém tentou se inscrever nos alertas, mas STATUS_KV não está configurado. Adicione o binding no Cloudflare Pages.</p>`,
         }),
       }).catch(e => console.error('pending-subscription email failed', e));
     }
@@ -118,9 +174,7 @@ export async function onRequestPost({ request, env }) {
   try { subs = raw ? JSON.parse(raw) : []; } catch { subs = []; }
   if (!Array.isArray(subs)) subs = [];
 
-  if (subs.some(s => s && s.email === email)) {
-    return json({ ok: true, already: true });
-  }
+  if (subs.some(s => s && s.email === email)) return json(PENDENTE);
 
   // O teto é checado depois do "já inscrito": quem já está na lista continua
   // recebendo a resposta idempotente mesmo com a lista cheia.
@@ -129,28 +183,22 @@ export async function onRequestPost({ request, env }) {
     return json({ error: 'Lista de inscrições temporariamente fechada.' }, 503);
   }
 
+  const id = await emailId(email);
+  if (await KV.get(pendingKey(id))) return json(PENDENTE);
+
   const token = crypto.randomUUID();
-  subs.push({ email, token, subscribedAt: new Date().toISOString() });
-
   // 1 write
-  await KV.put('subscribers', JSON.stringify(subs));
+  await KV.put(pendingKey(id), JSON.stringify({ email, token, at: new Date().toISOString() }), { expirationTtl: PENDING_TTL_S });
 
-  // Welcome email
-  const unsubUrl = `https://status.lucafchala.com/api/unsubscribe?token=${token}`;
+  const confirmUrl = `https://status.lucafchala.com/api/confirm?id=${id}&token=${token}`;
   const emailRes = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       from: NOTIFY_FROM,
       to: [email],
-      subject: 'Inscrição confirmada — status.lucafchala.com',
-      // RFC 8058: cliente de e-mail mostra o botão nativo de cancelar, e o
-      // POST de um clique cai direto no onRequestPost do unsubscribe.
-      headers: {
-        'List-Unsubscribe': `<${unsubUrl}>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      },
-      html: welcomeHtml(unsubUrl),
+      subject: 'Confirme sua inscrição — status.lucafchala.com',
+      html: confirmHtml(confirmUrl),
     }),
   });
 
@@ -160,14 +208,34 @@ export async function onRequestPost({ request, env }) {
     // domínio de envio ou o motivo da recusa — e nada disso é resposta para um
     // endereço não confirmado. Fica no log, onde o dono lê.
     const detail = await emailRes.text().catch(() => '');
-    console.error(`welcome email failed: ${emailRes.status} ${detail}`);
-    return json({ error: 'Inscrição salva, mas o e-mail de confirmação falhou.' }, 502);
+    console.error(`confirmation email failed: ${emailRes.status} ${detail}`);
+    // Sem o e-mail, o pendente só bloquearia uma nova tentativa por 24 h.
+    await KV.delete(pendingKey(id)).catch(() => {});
+    return json({ error: 'Não foi possível enviar o e-mail de confirmação. Tente mais tarde.' }, 502);
   }
 
-  return json({ ok: true });
+  return json(PENDENTE);
 }
 
-function welcomeHtml(unsubUrl) {
+function confirmHtml(confirmUrl) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="background:#0d0c0a;color:#e6e1d6;font-family:monospace;padding:32px;margin:0">
+  <p style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#6a6358;margin-bottom:20px">status.lucafchala.com</p>
+  <h1 style="font-family:Georgia,serif;font-weight:300;font-size:28px;margin:0 0 12px">
+    Confirme a <em style="color:#c08030;font-style:italic">inscrição</em>
+  </h1>
+  <p style="font-size:13px;color:#9a8f80;margin:0 0 20px">
+    Alguém (provavelmente você) pediu para receber um e-mail quando um serviço de lucafchala.com mudar de status.
+    Para ativar, abra o link abaixo e confirme. Ele vale por 24 horas.
+  </p>
+  <p style="margin:0 0 28px"><a href="${confirmUrl}" style="color:#c08030">Confirmar inscrição</a></p>
+  <p style="font-size:11px;color:#6a6358;border-top:1px solid #252220;padding-top:16px;margin:0">
+    Se não foi você, ignore esta mensagem: sem a confirmação, nada é guardado depois de 24 horas.
+  </p>
+</body></html>`;
+}
+
+export function welcomeHtml(unsubUrl) {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
 <body style="background:#0d0c0a;color:#e6e1d6;font-family:monospace;padding:32px;margin:0">
   <p style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#6a6358;margin-bottom:20px">status.lucafchala.com</p>
@@ -183,12 +251,6 @@ function welcomeHtml(unsubUrl) {
     <a href="https://status.lucafchala.com" style="color:#c08030;text-decoration:none">status.lucafchala.com</a>
   </p>
 </body></html>`;
-}
-
-function esc(s) {
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
 function json(data, status = 200) {
