@@ -6,7 +6,7 @@
   <title>Status — lucafchala.com</title>
   <meta name="theme-color" content="#0d0c0a" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <meta name="description" content="Status dos serviços do ecossistema lucafchala.com" />
+  <meta name="description" content="Status dos serviços do ecossistema lucafchala.com: disponibilidade agora, histórico de 90 dias e incidentes recentes." />
   <link rel="canonical" href="https://status.lucafchala.com/" />
   <link rel="sitemap" type="application/xml" href="/sitemap.xml" />
   <link rel="preload" as="font" type="font/woff2" href="/fonts/jetbrains-mono-latin-wght-normal.18be452724.woff2" crossorigin />
@@ -16,82 +16,117 @@
 </head>
 <body>
 
-<div class="controls">
-  <div class="controls-inner">
-    <button class="ctrl-btn" id="btn-theme" type="button" data-action="tema">light</button>
-    <span class="ctrl-sep">·</span>
-    <a href="https://lucafchala.com" class="ctrl-btn ctrl-link">home</a>
-  </div>
-</div>
+<a class="pular" href="#servicos">Pular para os serviços</a>
 
-<div class="wrap">
-  <header>
-    <h1 class="name">Status<br /><em>lucafchala.com</em></h1>
-    <p class="micro">monitoramento de serviços</p>
-  </header>
-
-  <div class="banner" id="banner">
-    <div class="status-dot checking" id="banner-dot"></div>
-    <span class="banner-text" id="banner-text">Verificando serviços…</span>
-    <span class="banner-sub" id="banner-sub"></span>
+<header class="topo">
+  <div class="topo-in">
+    <a class="marca" href="/" aria-label="Status lucafchala.com — início">
+      <span class="marca-ponto" aria-hidden="true"></span>
+      <span>Status <em>lucafchala.com</em></span>
+    </a>
+    <nav class="topo-acoes" aria-label="Ações">
+      <button class="btn btn-primario" id="btn-inscrever" type="button" data-action="inscrever-abrir"
+              aria-expanded="false" aria-controls="inscricao">Receber alertas</button>
+      <button class="btn btn-fantasma" id="btn-theme" type="button" data-action="tema">claro</button>
+      <a class="btn btn-fantasma" href="https://lucafchala.com">início</a>
+    </nav>
   </div>
 
-  <div class="rule section-anim">serviços</div>
-  <div class="services section-anim" id="services-list"></div>
-
-  <div class="rule section-anim-2">terceiros</div>
-  <div class="services section-anim-2" id="third-party-list"></div>
-
-  <!-- Hidden until the log has something to show: an empty section is noise. -->
-  <div id="history-section" hidden>
-    <div class="rule section-anim-2">histórico · 48h</div>
-    <div class="panel section-anim-2" id="history-panel"></div>
-  </div>
-
-  <!-- Hidden until there are samples: uma tabela de "—" sugeriria que a
-       latência está sendo observada quando ainda não há série nenhuma. -->
-  <div id="latency-section" hidden>
-    <div class="rule section-anim-2">tempo de resposta · 48h</div>
-    <div class="panel section-anim-2" id="latency-panel"></div>
-  </div>
-
-  <!-- Hidden unless CF_API_TOKEN/CF_ACCOUNT_ID are configured. -->
-  <div id="quota-section" hidden>
-    <div class="rule section-anim-2">cotas do plano gratuito</div>
-    <div class="panel section-anim-2" id="quota-panel"></div>
-  </div>
-
-  <div class="refresh-row">
-    <span class="last-checked" id="last-checked">–</span>
-    <button class="act-btn" id="btn-refresh" type="button" data-action="atualizar">↻ atualizar</button>
-  </div>
-
-  <div class="subscribe-wrap" id="subscribe-wrap">
-    <div id="sub-idle">
-      <button class="act-btn" type="button" data-action="inscrever-abrir">+ receber alertas por email</button>
-    </div>
-    <div id="sub-form" hidden>
-      <input type="email" id="sub-email" class="sub-input" placeholder="seu@email.com" aria-label="seu e-mail" />
-      <button class="act-btn ok" type="button" data-action="inscrever" id="sub-ok-btn">ok</button>
-      <button class="act-btn" type="button" data-action="inscrever-fechar" aria-label="cancelar">×</button>
-    </div>
-    <div id="sub-done" hidden>
-      <span class="micro">alertas ativados ✓</span>
-    </div>
-    <div id="sub-already" hidden>
-      <span class="micro">email já inscrito ✓</span>
-    </div>
-    <div id="sub-error" hidden>
-      <span class="micro erro" id="sub-error-msg">erro — tente novamente</span>
+  <!-- Inscrição: fechada até alguém pedir. -->
+  <div class="inscricao" id="inscricao" hidden>
+    <div class="inscricao-in">
+      <p class="inscricao-texto" id="inscricao-texto">
+        Um e-mail quando um serviço cair, ficar degradado ou voltar. Dá para cancelar pelo link de cada mensagem.
+      </p>
+      <div id="sub-form" class="inscricao-form">
+        <label class="sr-only" for="sub-email">Seu e-mail</label>
+        <input type="email" id="sub-email" class="campo" placeholder="seu@email.com" autocomplete="email"
+               aria-describedby="inscricao-texto" />
+        <button class="btn btn-primario" type="button" data-action="inscrever" id="sub-ok-btn">Inscrever</button>
+        <button class="btn btn-fantasma" type="button" data-action="inscrever-fechar">Cancelar</button>
+      </div>
+      <p id="sub-done" class="inscricao-ok" hidden role="status">✓ Alertas ativados.</p>
+      <p id="sub-already" class="inscricao-ok" hidden role="status">✓ Este e-mail já recebe os alertas.</p>
+      <p id="sub-error" class="inscricao-erro" hidden role="alert"><span id="sub-error-msg">Erro — tente novamente.</span></p>
     </div>
   </div>
+</header>
 
-  <footer>
+<main class="wrap" id="conteudo">
+
+  <!-- A faixa-resumo: o estado de tudo numa frase. -->
+  <section class="resumo" aria-labelledby="banner-text">
+    <div class="faixa estado-checking" id="banner">
+      <span class="faixa-icone" id="banner-icone" aria-hidden="true">…</span>
+      <div class="faixa-texto">
+        <h1 class="faixa-titulo" id="banner-text">Verificando serviços…</h1>
+        <p class="faixa-detalhe" id="banner-sub"></p>
+      </div>
+    </div>
+    <div class="idade-linha">
+      <p class="idade" id="last-checked">–</p>
+      <button class="btn btn-fantasma btn-pequeno" id="btn-refresh" type="button" data-action="atualizar">↻ atualizar</button>
+    </div>
+  </section>
+
+  <!-- Anuncia só MUDANÇA de estado (não cada atualização) a leitores de tela. -->
+  <div class="sr-only" id="anuncio" aria-live="polite" aria-atomic="true"></div>
+
+  <section class="secao" id="servicos" aria-labelledby="h-servicos" tabindex="-1">
+    <div class="secao-topo">
+      <h2 id="h-servicos">Serviços</h2>
+      <p class="secao-nota" id="barras-legenda">histórico</p>
+    </div>
+    <div id="services-list"></div>
+    <ul class="legenda" aria-label="Legenda das barras">
+      <li><span class="b-amostra up" aria-hidden="true"></span>operacional</li>
+      <li><span class="b-amostra degraded" aria-hidden="true"></span>degradado</li>
+      <li><span class="b-amostra down" aria-hidden="true"></span>fora do ar</li>
+      <li><span class="b-amostra nd" aria-hidden="true"></span>sem dado</li>
+    </ul>
+  </section>
+
+  <section class="secao" id="incidentes-secao" aria-labelledby="h-incidentes">
+    <div class="secao-topo">
+      <h2 id="h-incidentes">Incidentes recentes</h2>
+      <p class="secao-nota">48 h</p>
+    </div>
+    <div id="incidentes" class="incidentes"><p class="vazio">carregando…</p></div>
+  </section>
+
+  <section class="secao" id="latency-section" aria-labelledby="h-latencia" hidden>
+    <div class="secao-topo">
+      <h2 id="h-latencia">Tempo de resposta</h2>
+      <p class="secao-nota">48 h · mediana e p95</p>
+    </div>
+    <div class="painel" id="latency-panel"></div>
+  </section>
+
+  <section class="secao" aria-labelledby="h-terceiros">
+    <div class="secao-topo">
+      <h2 id="h-terceiros">Serviços de terceiros</h2>
+      <p class="secao-nota">de que o ecossistema depende</p>
+    </div>
+    <ul class="terceiros" id="third-party-list"></ul>
+  </section>
+
+  <section class="secao" id="quota-section" aria-labelledby="h-cotas" hidden>
+    <div class="secao-topo">
+      <h2 id="h-cotas">Cotas da conta Cloudflare</h2>
+      <p class="secao-nota">hoje, janela UTC</p>
+    </div>
+    <div class="painel" id="quota-panel"></div>
+  </section>
+</main>
+
+<footer class="rodape">
+  <p>
     <a href="https://lucafchala.com">lucafchala.com</a>
-    &nbsp;·&nbsp;
+    <span aria-hidden="true"> · </span>
     <a href="mailto:suporte@lucafchala.com">suporte@lucafchala.com</a>
-  </footer>
-</div>
+  </p>
+  <p class="rodape-nota" id="rodape-nota">Verificação própria, sem monitor de terceiros.</p>
+</footer>
 
 <script src="/app.js" defer></script>
 </body>

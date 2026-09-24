@@ -1,8 +1,16 @@
-// Painel de status — o script da página (antes inline no index.html).
+// Painel de status — o script da página.
 // Em arquivo para a CSP poder dizer script-src 'self' sem 'unsafe-inline'.
+//
+// Layout no padrão das páginas de status da indústria: uma faixa-resumo com
+// o estado de tudo numa frase; cada serviço com barras de histórico (uma por
+// dia com o retrato em D1, uma por hora sem ele) e a disponibilidade; os
+// incidentes das últimas 48 h numa linha do tempo; latência, terceiros e
+// cotas embaixo.
+
 const SERVICES = [
   { name: 'lucafchala.com',      url: 'https://lucafchala.com',                group: 'principal' },
   { name: 'Rádio',               url: 'https://radio.lucafchala.com',           group: 'principal' },
+  { name: 'Status',              url: 'https://status.lucafchala.com',          group: 'principal' },
   { name: 'Fotos',               url: 'https://fotos.lucafchala.com',           group: 'apps' },
   { name: 'Fotos — Dashboard',   url: 'https://fotos.lucafchala.com/dashboard', group: 'apps' },
   { name: 'Dash',                url: 'https://dash.lucafchala.com',            group: 'apps' },
@@ -13,10 +21,9 @@ const SERVICES = [
   { name: 'RG',                  url: 'https://rg.lucafchala.com',              group: 'apps' },
   { name: 'Pays',                url: 'https://pays.lucafchala.com',            group: 'apps' },
   { name: 'Treino',              url: 'https://treino.lucafchala.com',          group: 'apps' },
-  { name: 'Status',              url: 'https://status.lucafchala.com',          group: 'principal' },
 ];
+const GRUPOS = [['principal', 'Principais'], ['apps', 'Aplicativos']];
 
-// Third-party order must match what the server returns (functions/api/third-party-status.js)
 const THIRD_PARTY = [
   { name: 'GitHub',       page: 'https://www.githubstatus.com' },
   { name: 'Cloudflare',   page: 'https://www.cloudflarestatus.com' },
@@ -52,7 +59,12 @@ let ultimaVarredura = null;    // checkedAt da última varredura recebida (ms)
 let proximaEm = null;          // quando a próxima atualização está marcada (ms)
 let modoRetrato = null;        // o servidor tem retrato compartilhado? (null: ainda não sei)
 let retratoAtrasado = false;   // o agendador passou da hora
+let ultimoAnuncio = '';        // o que a região aria-live disse por último
+let resultados = [];           // última varredura aplicada
+let historicoAtual = null;     // último /api/painel → historico
+let barrasAtuais = null;       // último /api/painel → barras
 
+// ── Rede ────────────────────────────────────────────────────────────────
 // Resposta que não é 2xx, ou corpo que não é JSON, conta como falha — não
 // como "tudo offline". Quem não conseguiu perguntar não sabe a resposta.
 async function getJson(url) {
@@ -67,7 +79,7 @@ async function fetchStatus() {
   return json;
 }
 
-// Terceiros, cotas, histórico e latência numa chamada (functions/api/painel.js).
+// Tudo o que a página lê numa chamada (functions/api/painel.js).
 async function fetchPainel() {
   return getJson('/api/painel');
 }
@@ -93,16 +105,25 @@ function agendar() {
   refreshTimer = setTimeout(runChecks, espera);
 }
 
-function statusLabel(s) {
-  if (s === 'up') return 'online';
-  if (s === 'degraded') return 'lento';
-  if (s === 'down') return 'offline';
-  return 'sem dados';
+// ── Formatação ──────────────────────────────────────────────────────────
+// Estado nunca só por cor: cada um tem ícone e palavra.
+const ESTADOS = {
+  up:       { ic: '✓', txt: 'operacional' },
+  degraded: { ic: '!', txt: 'degradado' },
+  down:     { ic: '✕', txt: 'fora do ar' },
+  unknown:  { ic: '?', txt: 'sem dados' },
+  checking: { ic: '…', txt: 'verificando' },
+};
+const estadoDe = (s) => ESTADOS[s] || ESTADOS.unknown;
+function statusLabel(s) { return estadoDe(s).txt; }
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
-function fmtNum(n) {
-  return n == null ? '—' : n.toLocaleString('pt-BR');
-}
+function fmtNum(n) { return n == null ? '—' : n.toLocaleString('pt-BR'); }
 
 function fmtBytes(n) {
   if (n == null) return '—';
@@ -114,97 +135,114 @@ function fmtBytes(n) {
 
 function fmtAge(ms) {
   if (ms == null) return '';
-  const d = Math.floor(ms / 86400000); if (d >= 1) return d + 'd';
-  const h = Math.floor(ms / 3600000);  if (h >= 1) return h + 'h';
-  return Math.max(1, Math.floor(ms / 60000)) + 'min';
+  const d = Math.floor(ms / 86400000); if (d >= 1) return d + ' d';
+  const h = Math.floor(ms / 3600000);  if (h >= 1) return h + ' h';
+  return Math.max(1, Math.floor(ms / 60000)) + ' min';
+}
+
+function fmtDur(ms) {
+  if (ms == null || ms < 0) return '';
+  const min = Math.round(ms / 60000);
+  if (min < 60) return Math.max(1, min) + ' min';
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+function fmtPct(p) {
+  if (p == null || !Number.isFinite(p)) return '—';
+  return (p === 100 ? '100' : p.toFixed(p >= 99.95 ? 3 : 2)).replace('.', ',') + ' %';
+}
+
+const FMT_HORA = { hour: '2-digit', minute: '2-digit' };
+const FMT_DIA = { day: '2-digit', month: 'short' };
+function hora(ms) { return new Date(ms).toLocaleTimeString('pt-BR', FMT_HORA); }
+function dia(ms) { return new Date(ms).toLocaleDateString('pt-BR', FMT_DIA).replace('.', ''); }
+function timeTag(ms, texto) {
+  return `<time datetime="${new Date(ms).toISOString()}" title="${esc(new Date(ms).toLocaleString('pt-BR'))}">${esc(texto)}</time>`;
 }
 
 function rtLabel(rt, status) {
-  if (status === 'down') return '–';
-  if (rt >= 1000) return (rt / 1000).toFixed(1) + 's';
-  return rt + 'ms';
+  if (status === 'down' || rt == null) return '';
+  if (rt >= 1000) return (rt / 1000).toFixed(1).replace('.', ',') + ' s';
+  return rt + ' ms';
 }
 
 function codeLabel(code) {
-  if (!code) return '';
-  if (code >= 200 && code < 400) return '';   // normal — don't clutter
+  if (!code || (code >= 200 && code < 400)) return '';
   return 'HTTP ' + code;
 }
+
+function mostra(id, sim) { const el = document.getElementById(id); if (el) el.hidden = !sim; }
+
+// ── Esqueleto ───────────────────────────────────────────────────────────
+function renderSkeletons() {
+  const list = document.getElementById('services-list');
+  list.innerHTML = GRUPOS.map(([g, titulo]) => `
+    <div class="grupo">
+      <h3 class="grupo-titulo">${esc(titulo)}</h3>
+      <ul class="componentes">
+        ${SERVICES.map((svc, i) => svc.group !== g ? '' : `
+        <li class="componente" id="svc-${i}">
+          <div class="comp-linha">
+            <div class="comp-nome">
+              <a href="${esc(svc.url)}" target="_blank" rel="noopener">${esc(svc.name)}</a>
+              <span class="comp-url">${esc(svc.url.replace('https://', ''))}</span>
+            </div>
+            <span class="estado checking" id="lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>verificando</span></span>
+          </div>
+          <p class="comp-nota" id="hist-${i}"></p>
+          <div class="barras" id="barras-${i}" role="img" aria-label="histórico de ${esc(svc.name)} ainda não carregado"></div>
+          <div class="barras-rodape" aria-hidden="true">
+            <span id="barras-ini-${i}"></span>
+            <span class="uptime" id="uptime-${i}"></span>
+            <span id="barras-fim-${i}"></span>
+          </div>
+          <p class="barra-info" id="barra-info-${i}" aria-hidden="true"></p>
+          <div class="comp-meta">
+            <span id="rt-${i}"></span>
+            <span id="code-${i}"></span>
+            <span id="up24-${i}"></span>
+            <button class="checks-toggle" id="toggle-${i}" type="button" aria-expanded="false"
+                    aria-controls="checks-${i}" data-action="checks" data-i="${i}" hidden></button>
+          </div>
+          <ul class="checks" id="checks-${i}" aria-label="verificações de ${esc(svc.name)}"></ul>
+        </li>`).join('')}
+      </ul>
+    </div>`).join('');
+}
+
 function renderThirdPartySkeletons() {
   const list = document.getElementById('third-party-list');
   list.innerHTML = THIRD_PARTY.map((svc, i) => `
-    <a class="service" href="${svc.page}" target="_blank" rel="noopener"
-       id="tp-${i}" data-atraso="${0.28 + i * 0.05}">
-      <div class="status-dot checking" id="tp-dot-${i}"></div>
-      <div class="service-info">
-        <span class="service-name">${svc.name}</span>
-        <span class="service-url" id="tp-desc-${i}">${svc.page.replace('https://', '')}</span>
-      </div>
-      <div class="service-meta">
-        <span class="service-status-label" id="tp-lbl-${i}">—</span>
-      </div>
-    </a>
-  `).join('');
-}
-
-function updateThirdPartyRow(i, result) {
-  const dot  = document.getElementById(`tp-dot-${i}`);
-  const lbl  = document.getElementById(`tp-lbl-${i}`);
-  const desc = document.getElementById(`tp-desc-${i}`);
-  if (!dot) return;
-  dot.className = `status-dot ${result.status}`;
-  lbl.className = `service-status-label ${result.status}`;
-  lbl.textContent = statusLabel(result.status);
-  if (result.description) desc.textContent = result.description;
-}
-
-function renderSkeletons() {
-  const list = document.getElementById('services-list');
-  list.innerHTML = SERVICES.map((svc, i) => `
-    <div class="service-card" data-atraso="${0.20 + i * 0.06}">
-      <a class="service" href="${svc.url}" target="_blank" rel="noopener" id="svc-${i}">
-        <div class="status-dot checking" id="dot-${i}"></div>
-        <div class="service-info">
-          <span class="service-name">${svc.name}</span>
-          <span class="service-url">${svc.url.replace('https://', '')}</span>
-          <span class="service-hist" id="hist-${i}"></span>
-        </div>
-        <div class="service-meta">
-          <span class="service-status-label" id="lbl-${i}">—</span>
-          <span class="service-rt" id="rt-${i}"></span>
-          <span class="service-rt fraco" id="code-${i}"></span>
-        </div>
+    <li>
+      <a class="tp" href="${esc(svc.page)}" target="_blank" rel="noopener">
+        <span class="tp-info"><span class="tp-nome">${esc(svc.name)}</span><span class="tp-desc" id="tp-desc-${i}">${esc(svc.page.replace('https://', ''))}</span></span>
+        <span class="estado checking" id="tp-lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>verificando</span></span>
       </a>
-      <button class="checks-toggle" id="toggle-${i}" type="button" aria-expanded="false"
-              aria-controls="checks-${i}" data-action="checks" data-i="${i}" hidden></button>
-      <div class="checks" id="checks-${i}" role="region"></div>
-    </div>
-  `).join('');
+    </li>`).join('');
 }
 
-function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+function pintarEstado(el, status) {
+  if (!el) return;
+  const e = estadoDe(status);
+  el.className = `estado ${status in ESTADOS ? status : 'unknown'}`;
+  el.innerHTML = `<span class="estado-ic" aria-hidden="true">${e.ic}</span><span>${esc(e.txt)}</span>`;
 }
 
+// ── Serviços ────────────────────────────────────────────────────────────
 function updateServiceRow(i, result) {
-  const dot  = document.getElementById(`dot-${i}`);
-  const lbl  = document.getElementById(`lbl-${i}`);
-  const rt   = document.getElementById(`rt-${i}`);
+  if (i < 0) return;
+  pintarEstado(document.getElementById(`lbl-${i}`), result.status);
+  const rt = document.getElementById(`rt-${i}`);
   const code = document.getElementById(`code-${i}`);
-  if (!dot) return;
-  dot.className = `status-dot ${result.status}`;
-  lbl.className = `service-status-label ${result.status}`;
-  lbl.textContent = statusLabel(result.status);
-  rt.textContent = rtLabel(result.rt, result.status);
+  if (rt) rt.textContent = rtLabel(result.rt, result.status);
   if (code) code.textContent = codeLabel(result.statusCode);
   renderChecks(i, result);
 }
 
-// Renders the per-service functional breakdown. A service with any failing
-// check auto-expands (so a problem is never hidden behind a click); a fully
-// healthy service collapses behind a "N verificações ok" toggle.
+// Detalhe de cada serviço. Um serviço com qualquer verificação falhando abre
+// sozinho (o problema nunca fica atrás de um clique); um saudável recolhe
+// atrás de "N verificações ok".
 function renderChecks(i, result) {
   const panel  = document.getElementById(`checks-${i}`);
   const toggle = document.getElementById(`toggle-${i}`);
@@ -213,196 +251,28 @@ function renderChecks(i, result) {
   const checks = result.checks || [];
   if (!checks.length) { toggle.hidden = true; panel.classList.remove('show'); panel.innerHTML = ''; return; }
 
-  panel.innerHTML = checks.map(c => `
-    <div class="check">
-      <span class="check-dot ${c.status}"></span>
-      <span class="check-label">${esc(c.label)}</span>
-      <span class="check-detail ${c.status}">${esc(c.detail || (c.status === 'up' ? 'ok' : statusLabel(c.status)))}</span>
-    </div>
-  `).join('');
+  panel.innerHTML = checks.map(c => {
+    const e = estadoDe(c.status);
+    const quando = c.verificadoEm && Number.isFinite(Date.parse(c.verificadoEm))
+      ? ` <span class="check-quando">· conferido ${timeTag(Date.parse(c.verificadoEm), 'às ' + hora(Date.parse(c.verificadoEm)))}</span>` : '';
+    return `
+    <li class="check ${esc(c.status)}">
+      <span class="check-ic" aria-hidden="true">${e.ic}</span>
+      <span class="check-label"><span class="sr-only">${esc(e.txt)}: </span>${esc(c.label)}${quando}</span>
+      <span class="check-detail">${esc(c.detail || (c.status === 'up' ? 'ok' : e.txt))}</span>
+    </li>`;
+  }).join('');
 
   const problems = checks.filter(c => c.status !== 'up').length;
   toggle.hidden = false;
   toggle.classList.toggle('has-problems', problems > 0);
-
-  if (problems > 0) {
-    panel.classList.add('show');
-    toggle.setAttribute('aria-expanded', 'true');
-    toggle.textContent = `▾ ${problems} problema${problems > 1 ? 's' : ''}`;
-  } else {
-    panel.classList.remove('show');
-    toggle.setAttribute('aria-expanded', 'false');
-    toggle.textContent = `▸ ${checks.length} verificaç${checks.length > 1 ? 'ões' : 'ão'} ok`;
-  }
-}
-
-// Free-tier headroom. The panel stays hidden entirely when the Cloudflare API
-// credentials aren't configured — a row of "—" would imply the quota is fine
-// when the truth is that nobody is watching it.
-function renderQuotas(data) {
-  const section = document.getElementById('quota-section');
-  const panel   = document.getElementById('quota-panel');
-  if (!section || !panel) return;
-  // Seção que o servidor não conseguiu ler aparece dizendo isso. Sumir
-  // seria o painel ficar com cara de "sem problema de cota" justamente
-  // quando ninguém sabe.
-  if (data && data.erro) {
-    section.hidden = false;
-    panel.innerHTML = `<div class="panel-empty">cotas não lidas agora — ${esc(data.erro)}</div>`;
-    return;
-  }
-  if (!data || !data.configured) { section.hidden = true; return; }
-  section.hidden = false;
-
-  const quotas = (data.quotas || []).map(q => {
-    const fmt = q.bytes ? fmtBytes : fmtNum;
-    // A bar that renders as literally nothing reads as "no data"; floor a
-    // non-zero usage at a hairline so low-but-real consumption stays visible.
-    const width = q.pct == null ? 0 : Math.min(100, q.pct > 0 ? Math.max(q.pct, 1.5) : 0);
-    const val = q.used == null
-      ? 'sem dados'
-      : `${fmt(q.used)} / ${fmt(q.limit)}${q.pct != null ? ` · ${q.pct}%` : ''}`;
-    return `
-      <div class="quota">
-        <span class="quota-label">${esc(q.label)}</span>
-        <span class="quota-bar"><span class="quota-fill ${q.status}" data-largura="${width}"></span></span>
-        <span class="quota-val ${q.status}">${esc(val)}</span>
-      </div>`;
-  }).join('');
-
-  // Certificates aren't a quota, so they render as plain checks rather than
-  // meters — a progress bar for "expires in 60 days" would be nonsense.
-  const certs = (data.certs || []).map(c => `
-    <div class="check">
-      <span class="check-dot ${c.status}"></span>
-      <span class="check-label">TLS · ${esc(c.zone)}</span>
-      <span class="check-detail ${c.status}">${esc(c.detail)}</span>
-    </div>`).join('');
-
-  const errors = (data.errors || []).length
-    ? `<div class="panel-empty aviso">não lido: ${esc(data.errors.join(' · '))}</div>`
-    : '';
-
-  panel.innerHTML = quotas + certs + errors +
-    (data.note ? `<div class="panel-empty mt">${esc(data.note)}</div>` : '');
-  // Largura das barras pelo CSSOM: atributo de estilo no HTML a CSP bloqueia.
-  panel.querySelectorAll('[data-largura]').forEach(el => { el.style.width = el.dataset.largura + '%'; });
-}
-
-// The transition log — what a live-only dashboard structurally can't show.
-function renderHistory(data) {
-  const section = document.getElementById('history-section');
-  const panel   = document.getElementById('history-panel');
-  if (!section || !panel) return;
-
-  const entries = (data && data.entries) || [];
-  if (!entries.length) { section.hidden = true; return; }
-  section.hidden = false;
-
-  const rows = entries.slice(0, 12).map(e => {
-    const ago = fmtAge(Date.now() - new Date(e.at).getTime());
-    return `
-      <div class="hist">
-        <span class="hist-when">há ${esc(ago)}</span>
-        <span class="hist-name">${esc(e.name)}</span>
-        <span class="hist-to ${e.to}">${esc(statusLabel(e.from))} → ${esc(statusLabel(e.to))}</span>
-      </div>`;
-  }).join('');
-
-  // Flapping is the failure a 60-second dashboard hides best: a service that
-  // recovers between sweeps looks healthy at every single glance.
-  const flap = (data.flapping || []).length
-    ? `<div class="panel-empty aviso mt">instável: ${
-        esc(data.flapping.map(f => `${f.name} (${f.changes}×)`).join(' · '))}</div>`
-    : '';
-
-  panel.innerHTML = rows + flap;
-}
-
-// Sparkline em SVG puro — sem dependência, no mesmo espírito do resto da
-// página. Recebe a série em ordem cronológica (mais antigo primeiro).
-function sparkline(series, status) {
-  const W = 56, H = 14, P = 1.5;
-  if (series.length < 2) return '';
-  const min = Math.min(...series), max = Math.max(...series);
-  // Série achatada: uma linha reta no meio é mais honesta que uma divisão por
-  // zero ou um traço colado na borda de baixo.
-  const span = max - min || 1;
-  const pts = series.map((v, i) => {
-    const x = P + (i / (series.length - 1)) * (W - P * 2);
-    const y = H - P - ((v - min) / span) * (H - P * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-  return `<svg class="lat-spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true"
-    ><path class="${esc(status)}" d="M${pts.join('L')}"/></svg>`;
-}
-
-// Tendência de tempo de resposta. Responde o que o dashboard ao vivo não
-// consegue: não "está lento?", mas "está ficando lento?" — que é o aviso que
-// chega antes de o serviço sair do verde.
-function renderLatency(data) {
-  const section = document.getElementById('latency-section');
-  const panel   = document.getElementById('latency-panel');
-  if (!section || !panel) return;
-  if (!data || !data.available || !data.samples) { section.hidden = true; return; }
-
-  const svcs = data.services || {};
-  const names = Object.keys(svcs);
-  if (!names.length) { section.hidden = true; return; }
-  section.hidden = false;
-
-  // entries vem mais novo primeiro; a sparkline lê da esquerda (antigo) para
-  // a direita (agora), então a série é invertida antes de desenhar.
-  const chrono = (data.entries || []).slice().reverse();
-
-  const rows = names
-    // Piorando primeiro: a ordem da lista é a ordem em que vale olhar.
-    .sort((a, b) => {
-      const ra = svcs[a].trend.direction === 'piorando' ? 0 : 1;
-      const rb = svcs[b].trend.direction === 'piorando' ? 0 : 1;
-      return ra - rb || svcs[b].p95 - svcs[a].p95;
-    })
-    .map(name => {
-      const v = svcs[name];
-      const series = chrono.map(e => e.rt[name]).filter(n => typeof n === 'number');
-      // Reaproveita os mesmos limiares do servidor para colorir: p95 é o que
-      // o usuário lento realmente sente, não a mediana.
-      const sev = v.p95 >= 2500 ? 'down' : v.p95 >= 1000 ? 'degraded' : 'up';
-      const t = v.trend;
-      const arrow = t.direction === 'piorando' ? '▲' : t.direction === 'melhorando' ? '▼' : '·';
-      const trendTxt = t.deltaPct == null ? '·' : `${arrow} ${Math.abs(t.deltaPct)}%`;
-      return `
-        <div class="lat">
-          <span class="lat-name">${esc(name)}</span>
-          ${sparkline(series, sev)}
-          <span class="lat-trend ${esc(t.direction)}" title="mediana recente vs. anterior">${esc(trendTxt)}</span>
-          <span class="lat-val">p50 ${v.p50}ms · p95 ${v.p95}ms</span>
-        </div>`;
-    }).join('');
-
-  const worsening = (data.worsening || []).length
-    ? `<div class="panel-empty aviso mt">ficando mais lento: ${
-        esc(data.worsening.map(w => `${w.name} (+${w.deltaPct}%)`).join(' · '))}</div>`
-    : '';
-
-  panel.innerHTML = rows + worsening +
-    `<div class="panel-empty mt">${data.samples} amostras · ${data.intervalMinutes ? `1 a cada ${data.intervalMinutes}min` : '1 por varredura'}</div>`;
-}
-
-// Per-service incident context, right under the name — this is what answers
-// "is this new, or the same problem as an hour ago?" without a second look.
-function applyServiceHistory(data) {
-  const svcs = (data && data.services) || {};
-  SERVICES.forEach((s, i) => {
-    const el = document.getElementById(`hist-${i}`);
-    if (!el) return;
-    const inc = svcs[s.name] && svcs[s.name].lastIncident;
-    if (!inc) { el.textContent = ''; el.className = 'service-hist'; return; }
-    el.className = `service-hist${inc.resolved ? '' : ' ' + inc.severity}`;
-    el.textContent = inc.resolved
-      ? `esteve ${statusLabel(inc.severity)} há ${fmtAge(inc.agoMs)} · durou ${fmtAge(inc.durationMs)}`
-      : `${statusLabel(inc.severity)} há ${fmtAge(inc.durationMs)}`;
-  });
+  const aberto = problems > 0 || panel.classList.contains('show');
+  panel.classList.toggle('show', aberto);
+  toggle.setAttribute('aria-expanded', aberto ? 'true' : 'false');
+  toggle.dataset.rotulo = problems > 0
+    ? `${problems} problema${problems > 1 ? 's' : ''}`
+    : `${checks.length} verificaç${checks.length > 1 ? 'ões' : 'ão'} ok`;
+  toggle.textContent = `${aberto ? '▾' : '▸'} ${toggle.dataset.rotulo}`;
 }
 
 function toggleChecks(i) {
@@ -411,43 +281,193 @@ function toggleChecks(i) {
   if (!panel || !toggle) return;
   const open = panel.classList.toggle('show');
   toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-  toggle.textContent = (open ? '▾' : '▸') + toggle.textContent.slice(1);
+  toggle.textContent = `${open ? '▾' : '▸'} ${toggle.dataset.rotulo || ''}`;
 }
 
-function updateBanner(results) {
-  const dot  = document.getElementById('banner-dot');
-  const text = document.getElementById('banner-text');
-  const sub  = document.getElementById('banner-sub');
-  const down = results.filter(r => r.status === 'down').length;
-  const deg  = results.filter(r => r.status === 'degraded').length;
-  const up   = results.filter(r => r.status === 'up').length;
+// A versão implantada que o serviço declara (hoje só o fotos, pelo healthz).
+function versaoDe(result) {
+  const c = (result && result.checks || []).find(x => x && x.versao);
+  return c ? c.versao : null;
+}
 
-  if (down === 0 && deg === 0) {
-    dot.className = 'status-dot all-up';
-    text.textContent = 'Todos os sistemas operacionais';
-  } else if (down === results.length) {
-    dot.className = 'status-dot all-down';
-    text.textContent = 'Interrupção generalizada';
-  } else {
-    dot.className = 'status-dot some-down';
-    const issues = [];
-    if (down > 0) issues.push(`${down} offline`);
-    if (deg > 0)  issues.push(`${deg} lento${deg > 1 ? 's' : ''}`);
-    text.textContent = `Degradação parcial — ${issues.join(', ')}`;
+// Nota sob o nome: o incidente recente (o que responde "isto é novo ou é o
+// mesmo problema de uma hora atrás?") e o último deploy, se recente.
+function applyServiceNotes(historico) {
+  const svcs = (historico && historico.services) || {};
+  SERVICES.forEach((s, i) => {
+    const el = document.getElementById(`hist-${i}`);
+    if (!el) return;
+    const partes = [];
+    const inc = svcs[s.name] && svcs[s.name].lastIncident;
+    if (inc) {
+      partes.push(inc.resolved
+        ? `esteve ${esc(statusLabel(inc.severity))} ${timeTag(Date.parse(inc.endedAt), 'há ' + fmtAge(inc.agoMs))} · durou ${esc(fmtDur(inc.durationMs))}`
+        : `<span class="${esc(inc.severity)}">${esc(statusLabel(inc.severity))} ${timeTag(Date.parse(inc.startedAt), 'há ' + fmtAge(inc.durationMs))}</span>`);
+    }
+    const r = resultados.find(x => x.name === s.name);
+    const v = versaoDe(r);
+    const em = v && Date.parse(v.em);
+    if (v && Number.isFinite(em) && Date.now() - em < 48 * 3600000) {
+      partes.push(`<span class="selo" title="versão ${esc(v.id)}">deploy ${esc(v.tag || v.id.slice(0, 8))} ${timeTag(em, 'há ' + fmtAge(Date.now() - em))}</span>`);
+    }
+    el.innerHTML = partes.join(' · ');
+  });
+}
+
+// ── Barras de histórico ─────────────────────────────────────────────────
+function rotuloPeriodo(barras, k) {
+  const p = barras.periodos[k];
+  if (!p) return '';
+  if (barras.tipo === 'diario') {
+    const [y, m, d] = p.inicio.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' }).replace('.', '');
   }
-
-  sub.textContent = `${up}/${results.length} ok`;
+  const ini = Date.parse(p.inicio);
+  return `${dia(ini)}, ${hora(ini)}–${hora(ini + 3600000)}`;
 }
 
-// Idade do dado, não hora do pedido. "verificado às 14:02:10" com a hora do
-// navegador dizia quando a PÁGINA perguntou; o que importa é quando a
-// varredura rodou, que pode ter sido minutos antes (cache de borda, piso por
-// isolate, agendador). Atualizado localmente a cada 30 s, sem rede.
-function fmtIdade(ms) {
-  if (ms < 60000) return 'agora há pouco';
-  return 'há ' + fmtAge(ms);
+function descreveBarra(barras, nome, k) {
+  const b = (barras.servicos[nome] || [])[k] || { estado: null };
+  const quando = rotuloPeriodo(barras, k);
+  if (!b.estado) return `${quando}: sem dado`;
+  const partes = [`${quando}: ${statusLabel(b.estado)}`];
+  if (b.pct != null) partes.push(`${fmtPct(b.pct)} disponível`);
+  if (b.fora) partes.push(`${b.fora} varredura${b.fora > 1 ? 's' : ''} fora do ar`);
+  if (b.lentas) partes.push(`${b.lentas} degradada${b.lentas > 1 ? 's' : ''}`);
+  if (b.varreduras) partes.push(`de ${b.varreduras}`);
+  return partes.join(' · ');
 }
 
+// Disponibilidade da janela: média ponderada pelo que se sabe. Dia sem dado
+// não entra — nem como 100 %, nem como 0.
+function uptimeJanela(lista) {
+  let peso = 0, soma = 0;
+  for (const b of lista) {
+    if (!b || !b.estado || b.pct == null) continue;
+    const w = b.varreduras || 1;
+    peso += w; soma += w * b.pct;
+  }
+  return peso ? soma / peso : null;
+}
+
+function renderBarras(barras) {
+  barrasAtuais = barras && !barras.erro && Array.isArray(barras.periodos) ? barras : null;
+  const legenda = document.getElementById('barras-legenda');
+  const diario = barrasAtuais && barrasAtuais.tipo === 'diario';
+  const n = barrasAtuais ? barrasAtuais.periodos.length : 0;
+  if (legenda) {
+    legenda.textContent = !barrasAtuais ? 'histórico indisponível'
+      : diario ? `${n} dias · 1 barra por dia` : `${n} h · 1 barra por hora (sem banco: reconstruído das transições)`;
+  }
+  SERVICES.forEach((s, i) => {
+    const el = document.getElementById(`barras-${i}`);
+    if (!el) return;
+    const ini = document.getElementById(`barras-ini-${i}`);
+    const fim = document.getElementById(`barras-fim-${i}`);
+    const up = document.getElementById(`uptime-${i}`);
+    if (!barrasAtuais) {
+      el.innerHTML = ''; el.className = 'barras';
+      el.setAttribute('aria-label', `histórico de ${s.name} indisponível`);
+      if (ini) ini.textContent = ''; if (fim) fim.textContent = ''; if (up) up.textContent = '';
+      return;
+    }
+    const lista = barrasAtuais.servicos[s.name] || barrasAtuais.periodos.map(() => ({ estado: null }));
+    el.className = `barras ${diario ? 'diario' : 'horario'}`;
+    el.innerHTML = lista.map((b, k) =>
+      `<span class="b ${esc(b.estado || 'nd')}" data-action="barra" data-i="${i}" data-k="${k}" title="${esc(descreveBarra(barrasAtuais, s.name, k))}"></span>`,
+    ).join('');
+    const conta = { up: 0, degraded: 0, down: 0, nd: 0 };
+    for (const b of lista) conta[b.estado || 'nd']++;
+    const pct = uptimeJanela(lista);
+    const unidade = diario ? 'dias' : 'h';
+    el.setAttribute('aria-label',
+      `${s.name}, últimos ${n} ${unidade}: ${pct == null ? 'sem dados' : fmtPct(pct) + ' disponível'}` +
+      `${conta.down ? `; ${conta.down} ${diario ? 'dias' : 'horas'} com queda` : ''}` +
+      `${conta.degraded ? `; ${conta.degraded} ${diario ? 'dias' : 'horas'} degradados` : ''}` +
+      `${conta.nd ? `; ${conta.nd} sem dado` : ''}`);
+    if (ini) ini.innerHTML = diario
+      ? `<span class="so-largo">${n} dias atrás</span><span class="so-estreito">30 dias atrás</span>`
+      : `<span class="so-largo">${n} h atrás</span><span class="so-estreito">24 h atrás</span>`;
+    if (fim) fim.textContent = diario ? 'hoje' : 'agora';
+    if (up) up.textContent = pct == null ? 'sem dados ainda' : `${fmtPct(pct)} disponível`;
+  });
+}
+
+// Toque ou passagem do mouse numa barra: a linha abaixo diz o período.
+function mostraBarra(el) {
+  if (!barrasAtuais) return;
+  const i = Number(el.dataset.i), k = Number(el.dataset.k);
+  const info = document.getElementById(`barra-info-${i}`);
+  document.querySelectorAll(`#barras-${i} .b.ativa`).forEach(x => x.classList.remove('ativa'));
+  el.classList.add('ativa');
+  if (info) info.textContent = descreveBarra(barrasAtuais, SERVICES[i].name, k);
+}
+
+function applyUptime(uptime) {
+  const h24 = (uptime && uptime.h24) || {};
+  const h48 = (uptime && uptime.h48) || {};
+  SERVICES.forEach((s, i) => {
+    const el = document.getElementById(`up24-${i}`);
+    if (!el) return;
+    const a = h24[s.name] && h24[s.name].pct, b = h48[s.name] && h48[s.name].pct;
+    el.textContent = a == null && b == null ? '' : `24 h: ${fmtPct(a)} · 48 h: ${fmtPct(b)}`;
+  });
+}
+
+// ── Faixa-resumo ────────────────────────────────────────────────────────
+// Uma frase com o que importa: "tudo operacional", ou QUEM está mal e desde
+// quando ("Treino degradado há 12 min"). O "desde quando" vem do histórico.
+function updateBanner(results) {
+  const faixa = document.getElementById('banner');
+  const icone = document.getElementById('banner-icone');
+  const text  = document.getElementById('banner-text');
+  const sub   = document.getElementById('banner-sub');
+  const ruins = results.filter(r => r.status === 'down' || r.status === 'degraded')
+    .sort((a, b) => (a.status === 'down' ? 0 : 1) - (b.status === 'down' ? 0 : 1));
+  const desde = (nome) => {
+    const inc = historicoAtual && historicoAtual.services && historicoAtual.services[nome] && historicoAtual.services[nome].lastIncident;
+    return inc && !inc.resolved ? ` há ${fmtAge(inc.durationMs)}` : '';
+  };
+  let estado, titulo, detalhe;
+  if (!ruins.length) {
+    estado = 'up'; titulo = 'Todos os sistemas operacionais';
+    detalhe = `${results.length} serviços verificados`;
+  } else if (ruins.length === results.length) {
+    estado = 'down'; titulo = 'Interrupção generalizada';
+    detalhe = 'nenhum serviço respondeu como deveria';
+  } else if (ruins.length === 1) {
+    const r = ruins[0];
+    estado = r.status; titulo = `${r.name} ${statusLabel(r.status)}${desde(r.name)}`;
+    detalhe = (r.problems && r.problems[0]) || '';
+  } else {
+    estado = ruins.some(r => r.status === 'down') ? 'down' : 'degraded';
+    titulo = `${ruins.length} serviços com problema`;
+    detalhe = ruins.map(r => `${r.name} ${statusLabel(r.status)}${desde(r.name)}`).join(' · ');
+  }
+  faixa.className = `faixa estado-${estado}`;
+  icone.textContent = estadoDe(estado).ic;
+  text.textContent = titulo;
+  sub.textContent = detalhe;
+  anunciar(titulo);
+}
+
+function showBannerUnknown() {
+  document.getElementById('banner').className = 'faixa estado-unknown';
+  document.getElementById('banner-icone').textContent = '?';
+  document.getElementById('banner-text').textContent = 'Sem resposta do servidor de status';
+  document.getElementById('banner-sub').textContent = 'estado desconhecido — nova tentativa automática';
+  anunciar('Sem resposta do servidor de status');
+}
+
+// Leitor de tela ouve a MUDANÇA, não cada atualização silenciosa.
+function anunciar(texto) {
+  if (texto === ultimoAnuncio) return;
+  ultimoAnuncio = texto;
+  const el = document.getElementById('anuncio');
+  if (el) el.textContent = texto;
+}
+
+// Idade do dado, não hora do pedido. Atualizado a cada 30 s, sem rede.
 function updateLastChecked() {
   const el = document.getElementById('last-checked');
   if (!el) return;
@@ -456,26 +476,224 @@ function updateLastChecked() {
   if (ultimaVarredura != null) {
     // Relógio do navegador adiantado não pode produzir idade negativa.
     const idade = Math.max(0, agora - ultimaVarredura);
-    const quando = new Date(ultimaVarredura);
-    partes.push('verificado <time datetime="' + quando.toISOString() + '" title="' +
-      esc(quando.toLocaleString('pt-BR')) + '">' + fmtIdade(idade) + '</time>');
+    partes.push('verificado ' + timeTag(ultimaVarredura, idade < 60000 ? 'agora há pouco' : 'há ' + fmtAge(idade)));
   } else {
     partes.push('ainda sem verificação');
   }
-  if (falhasSeguidas > 0) {
-    partes.push('<span class="stale">sem resposta do servidor</span>');
-  } else if (retratoAtrasado) {
-    partes.push('<span class="stale">agendador atrasado</span>');
-  }
+  if (falhasSeguidas > 0) partes.push('<span class="stale">sem resposta do servidor</span>');
+  else if (retratoAtrasado) partes.push('<span class="stale">agendador atrasado</span>');
   if (proximaEm != null) {
     const falta = Math.max(0, proximaEm - agora);
-    partes.push('próxima atualização em ' + (falta < 60000 ? 'menos de 1min' : fmtAge(falta)));
+    partes.push('próxima atualização em ' + (falta < 60000 ? 'menos de 1 min' : fmtAge(falta)));
   } else if (document.hidden) {
     partes.push('pausado (aba em segundo plano)');
   }
   el.innerHTML = partes.join(' · ');
 }
 
+// ── Incidentes ──────────────────────────────────────────────────────────
+// Transições (mais nova primeiro) viram incidentes: começa quando sai de
+// "operacional", termina quando volta; piora no meio (degradado → fora do ar)
+// fica no mesmo incidente, com o pior estado.
+function montaIncidentes(entries) {
+  const abertos = new Map();
+  const lista = [];
+  for (const e of entries.slice().reverse()) {
+    const t = Date.parse(e.at);
+    if (!Number.isFinite(t)) continue;
+    const aberto = abertos.get(e.name);
+    if (e.to !== 'up') {
+      if (aberto) {
+        if (e.to === 'down') aberto.pior = 'down';
+      } else {
+        abertos.set(e.name, { nome: e.name, inicio: t, fim: null, pior: e.to, causa: (e.problems || [])[0] || '' });
+      }
+    } else if (aberto) {
+      aberto.fim = t;
+      lista.push(aberto);
+      abertos.delete(e.name);
+    }
+  }
+  for (const a of abertos.values()) lista.push(a);
+  return lista.sort((a, b) => (b.fim == null) - (a.fim == null) || b.inicio - a.inicio);
+}
+
+function renderIncidentes(historico) {
+  const el = document.getElementById('incidentes');
+  if (!el) return;
+  if (!historico || historico.erro || historico.available === false) {
+    el.innerHTML = `<p class="vazio">histórico indisponível${historico && historico.detail ? ' — ' + esc(historico.detail) : ''}</p>`;
+    return;
+  }
+  const incs = montaIncidentes(historico.entries || []);
+  const flap = (historico.flapping || []).length
+    ? `<p class="vazio aviso">instável: ${esc(historico.flapping.map(f => `${f.name} (${f.changes} mudanças)`).join(' · '))}</p>` : '';
+  if (!incs.length) {
+    el.innerHTML = `<p class="vazio">Nenhum incidente nas últimas 48 h.</p>${flap}`;
+    return;
+  }
+  const hoje = new Date().toDateString();
+  const ontem = new Date(Date.now() - 86400000).toDateString();
+  const grupos = new Map();
+  for (const inc of incs) {
+    const d = new Date(inc.inicio).toDateString();
+    const rot = d === hoje ? 'hoje' : d === ontem ? 'ontem' : dia(inc.inicio);
+    if (!grupos.has(rot)) grupos.set(rot, []);
+    grupos.get(rot).push(inc);
+  }
+  el.innerHTML = [...grupos.entries()].map(([rot, lista]) => `
+    <div class="dia">
+      <h3 class="dia-titulo">${esc(rot)}</h3>
+      <ul class="dia-lista">
+        ${lista.map(inc => {
+          const e = estadoDe(inc.pior);
+          const quando = inc.fim == null
+            ? `<span class="inc-aberto">em andamento</span> · desde ${timeTag(inc.inicio, hora(inc.inicio))} (${esc(fmtDur(Date.now() - inc.inicio))})`
+            : `${timeTag(inc.inicio, hora(inc.inicio))} → ${timeTag(inc.fim, hora(inc.fim))} · durou ${esc(fmtDur(inc.fim - inc.inicio))}`;
+          return `
+          <li class="inc ${esc(inc.pior)}">
+            <span class="inc-ic" aria-hidden="true">${e.ic}</span>
+            <div>
+              <div class="inc-titulo"><strong>${esc(inc.nome)}</strong> ${esc(e.txt)}</div>
+              <div class="inc-quando">${quando}</div>
+              ${inc.causa ? `<div class="inc-causa">${esc(inc.causa)}</div>` : ''}
+            </div>
+          </li>`;
+        }).join('')}
+      </ul>
+    </div>`).join('') + flap;
+}
+
+// ── Latência ────────────────────────────────────────────────────────────
+// Sparkline em SVG puro, com o deploy marcado: a causa mais comum de uma
+// regressão de latência é um deploy, e ver os dois no mesmo eixo poupa a
+// investigação.
+function sparkline(pontos, status, deploys) {
+  const W = 72, H = 16, P = 1.5;
+  if (pontos.length < 2) return '';
+  const vs = pontos.map(p => p.v);
+  const min = Math.min(...vs), max = Math.max(...vs);
+  // Série achatada: uma linha reta no meio é mais honesta que uma divisão por
+  // zero ou um traço colado na borda de baixo.
+  const span = max - min || 1;
+  const t0 = pontos[0].t, t1 = pontos[pontos.length - 1].t, dt = t1 - t0 || 1;
+  const x = (t) => P + ((t - t0) / dt) * (W - P * 2);
+  const d = pontos.map(p => `${x(p.t).toFixed(1)},${(H - P - ((p.v - min) / span) * (H - P * 2)).toFixed(1)}`);
+  const marcas = (deploys || []).filter(t => t >= t0 && t <= t1)
+    .map(t => `<line class="deploy" x1="${x(t).toFixed(1)}" x2="${x(t).toFixed(1)}" y1="0" y2="${H}"/>`).join('');
+  return `<svg class="lat-spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">${marcas}<path class="${esc(status)}" d="M${d.join('L')}"/></svg>`;
+}
+
+function renderLatency(data, implantacoes) {
+  const section = document.getElementById('latency-section');
+  const panel   = document.getElementById('latency-panel');
+  if (!section || !panel) return;
+  if (!data || !data.available || !data.samples) { section.hidden = true; return; }
+  const svcs = data.services || {};
+  const names = Object.keys(svcs);
+  if (!names.length) { section.hidden = true; return; }
+  section.hidden = false;
+
+  // Deploys por serviço: os da série do D1 e, sem ele, a versão atual.
+  const deploys = {};
+  for (const d of implantacoes || []) (deploys[d.servico] ||= []).push(Date.parse(d.em));
+  for (const r of resultados) {
+    const v = versaoDe(r);
+    if (v && v.em && !(deploys[r.name] || []).length) (deploys[r.name] ||= []).push(Date.parse(v.em));
+  }
+
+  const chrono = (data.entries || []).slice().reverse();
+  const rows = names
+    .sort((a, b) => {
+      const ra = svcs[a].trend.direction === 'piorando' ? 0 : 1;
+      const rb = svcs[b].trend.direction === 'piorando' ? 0 : 1;
+      return ra - rb || svcs[b].p95 - svcs[a].p95;
+    })
+    .map(name => {
+      const v = svcs[name];
+      const pontos = chrono.filter(e => typeof e.rt[name] === 'number').map(e => ({ t: Date.parse(e.at), v: e.rt[name] }));
+      const sev = v.p95 >= 2500 ? 'down' : v.p95 >= 1000 ? 'degraded' : 'up';
+      const t = v.trend;
+      const arrow = t.direction === 'piorando' ? '▲' : t.direction === 'melhorando' ? '▼' : '·';
+      const trendTxt = t.deltaPct == null ? '·' : `${arrow} ${Math.abs(t.deltaPct)} %`;
+      const dep = (deploys[name] || []).filter(Number.isFinite);
+      return `
+        <div class="lat">
+          <span class="lat-name">${esc(name)}${dep.length ? ' <span class="selo">deploy</span>' : ''}</span>
+          ${sparkline(pontos, sev, dep)}
+          <span class="lat-trend ${esc(t.direction)}" title="mediana recente vs. anterior">${esc(trendTxt)}</span>
+          <span class="lat-val">p50 ${v.p50} ms · p95 ${v.p95} ms</span>
+        </div>`;
+    }).join('');
+
+  const worsening = (data.worsening || []).length
+    ? `<div class="panel-empty aviso mt">ficando mais lento: ${
+        esc(data.worsening.map(w => `${w.name} (+${w.deltaPct} %)`).join(' · '))}</div>`
+    : '';
+  panel.innerHTML = rows + worsening +
+    `<div class="panel-empty mt">${data.samples} amostras · ${data.intervalMinutes ? `1 a cada ${data.intervalMinutes} min` : '1 por varredura'} · linha tracejada = deploy</div>`;
+}
+
+// ── Terceiros ───────────────────────────────────────────────────────────
+// Seção ilegível vira "sem dados" em cada linha, não "fora do ar".
+function applyThirdParty(data) {
+  const svcs = data && Array.isArray(data.services) ? data.services : null;
+  THIRD_PARTY.forEach((s, i) => {
+    const r = svcs && svcs.find(x => x.name === s.name);
+    pintarEstado(document.getElementById(`tp-lbl-${i}`), r ? r.status : 'unknown');
+    const desc = document.getElementById(`tp-desc-${i}`);
+    if (desc && r && r.description) desc.textContent = r.description;
+  });
+}
+
+// ── Cotas ───────────────────────────────────────────────────────────────
+// Sem o token, a seção diz "não monitorado" em vez de sumir: uma cota que
+// ninguém vigia não pode ter cara de cota que está bem.
+function renderQuotas(data) {
+  const section = document.getElementById('quota-section');
+  const panel   = document.getElementById('quota-panel');
+  if (!section || !panel) return;
+  section.hidden = false;
+  if (!data || data.erro) {
+    panel.innerHTML = `<div class="panel-empty aviso">cotas não lidas agora${data && data.erro ? ' — ' + esc(data.erro) : ''}</div>`;
+    return;
+  }
+  if (!data.configured) {
+    panel.innerHTML = `<div class="panel-empty">não monitorado — ${esc(data.detail || 'sem token da API da Cloudflare')}</div>`;
+    return;
+  }
+  const quotas = (data.quotas || []).map(q => {
+    const fmt = q.bytes ? fmtBytes : fmtNum;
+    // Uma barra que não pinta nada lê como "sem dado"; consumo pequeno mas
+    // real ganha um fio visível.
+    const width = q.pct == null ? 0 : Math.min(100, q.pct > 0 ? Math.max(q.pct, 1.5) : 0);
+    const val = q.used == null ? 'sem dados' : `${fmt(q.used)} / ${fmt(q.limit)}${q.pct != null ? ` · ${String(q.pct).replace('.', ',')} %` : ''}`;
+    return `
+      <div class="quota">
+        <span class="quota-label">${esc(q.label)}</span>
+        <span class="quota-bar" aria-hidden="true"><span class="quota-fill ${esc(q.status)}" data-largura="${width}"></span></span>
+        <span class="quota-val ${esc(q.status)}">${esc(val)}</span>
+      </div>`;
+  }).join('');
+  // Certificados não são cota: linha de verificação, não barra.
+  const certs = (data.certs || []).map(c => {
+    const e = estadoDe(c.status);
+    return `
+    <div class="check ${esc(c.status)}">
+      <span class="check-ic" aria-hidden="true">${e.ic}</span>
+      <span class="check-label">TLS · ${esc(c.zone)}</span>
+      <span class="check-detail">${esc(c.detail)}</span>
+    </div>`;
+  }).join('');
+  const errors = (data.errors || []).length
+    ? `<div class="panel-empty aviso">não lido: ${esc(data.errors.join(' · '))}</div>` : '';
+  panel.innerHTML = quotas + certs + errors +
+    (data.note ? `<div class="panel-empty mt">${esc(data.note)}</div>` : '');
+  // Largura das barras pelo CSSOM: atributo de estilo no HTML a CSP bloqueia.
+  panel.querySelectorAll('[data-largura]').forEach(el => { el.style.width = el.dataset.largura + '%'; });
+}
+
+// ── Ciclo de atualização ────────────────────────────────────────────────
 async function runChecks(manual) {
   if (checking) return;
   // Evento de clique chega como argumento: só `true` explícito é manual.
@@ -490,9 +708,9 @@ async function runChecks(manual) {
   let ok = true;
 
   function aplicarStatus(data) {
-    const results = data.services;
-    results.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
-    updateBanner(results);
+    resultados = data.services;
+    resultados.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
+    updateBanner(resultados);
     const t = Date.parse(data.checkedAt);
     ultimaVarredura = Number.isFinite(t) ? t : null;
     retratoAtrasado = !!(data.retrato && data.retrato.atrasado);
@@ -504,18 +722,22 @@ async function runChecks(manual) {
     } catch (e) {
       ok = false;
       // Sem resposta NÃO é "tudo offline": as linhas mantêm o último estado
-      // conhecido e a idade dele segue visível. Se nunca houve estado, o
-      // banner diz que não sabe — em vez de pintar treze serviços de vermelho.
+      // conhecido e a idade dele segue visível. Se nunca houve estado, a
+      // faixa diz que não sabe — em vez de pintar treze serviços de vermelho.
       if (ultimaVarredura == null) showBannerUnknown();
     }
   }
 
   function aplicarPainel(painel) {
+    historicoAtual = painel.historico && !painel.historico.erro ? painel.historico : null;
     applyThirdParty(painel.terceiros);
     renderQuotas(painel.cotas);
-    renderHistory(painel.historico);
-    applyServiceHistory(painel.historico);
-    renderLatency(painel.latencia);
+    renderIncidentes(painel.historico);
+    renderBarras(painel.barras);
+    applyUptime(painel.uptime);
+    applyServiceNotes(historicoAtual);
+    renderLatency(painel.latencia, painel.implantacoes);
+    if (resultados.length) updateBanner(resultados);
   }
 
   // Com o retrato compartilhado (D1), o painel já traz o status LIDO — uma
@@ -549,47 +771,37 @@ async function runChecks(manual) {
   updateLastChecked();
 }
 
-function showBannerUnknown() {
-  document.getElementById('banner-dot').className = 'status-dot';
-  document.getElementById('banner-text').textContent = 'Sem resposta do servidor de status';
-  document.getElementById('banner-sub').textContent = 'estado desconhecido';
-}
-
-// Terceiros: seção ilegível vira "sem dados" em cada linha, não "offline".
-function applyThirdParty(data) {
-  const svcs = data && Array.isArray(data.services) ? data.services : null;
-  THIRD_PARTY.forEach((s, i) => {
-    const r = svcs && svcs.find(x => x.name === s.name);
-    updateThirdPartyRow(i, r || { status: 'unknown', description: '' });
-  });
-}
+// ── Tema e inscrição ────────────────────────────────────────────────────
+function rotuloTema(atual) { return atual === 'dark' ? 'claro' : 'escuro'; }
 
 function toggleTheme() {
   const html = document.documentElement;
-  const current = html.getAttribute('data-theme');
-  const next = current === 'dark' ? 'light' : 'dark';
+  const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   html.setAttribute('data-theme', next);
-  try { localStorage.setItem('theme', next); } catch(e) {}
-  document.getElementById('btn-theme').textContent = next === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem('theme', next); } catch (e) { /* modo privado: o tema vale só nesta visita */ }
+  const btn = document.getElementById('btn-theme');
+  btn.textContent = rotuloTema(next);
+  btn.setAttribute('aria-label', `mudar para o tema ${rotuloTema(next)}`);
 }
 
-function mostra(id, sim) { const el = document.getElementById(id); if (el) el.hidden = !sim; }
-
 function showSubscribe() {
-  mostra('sub-idle', false);
+  mostra('inscricao', true);
   mostra('sub-form', true);
+  ['sub-done', 'sub-already', 'sub-error'].forEach(id => mostra(id, false));
+  document.getElementById('btn-inscrever').setAttribute('aria-expanded', 'true');
   document.getElementById('sub-email').focus();
 }
 
 function hideSubscribe() {
-  mostra('sub-form', false);
-  mostra('sub-idle', true);
+  mostra('inscricao', false);
+  document.getElementById('btn-inscrever').setAttribute('aria-expanded', 'false');
   document.getElementById('sub-email').value = '';
+  document.getElementById('btn-inscrever').focus();
 }
 
 function showSubError(msg) {
   const el = document.getElementById('sub-error-msg');
-  if (el) el.textContent = msg || 'erro — tente novamente';
+  if (el) el.textContent = msg || 'Erro — tente novamente.';
   mostra('sub-error', true);
 }
 
@@ -597,6 +809,7 @@ async function doSubscribe() {
   const input = document.getElementById('sub-email');
   const email = input.value.trim();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    showSubError('Confira o endereço de e-mail.');
     input.focus();
     return;
   }
@@ -618,34 +831,36 @@ async function doSubscribe() {
       mostra('sub-form', false);
       mostra('sub-done', true);
     } else {
-      btn.disabled = false;
-      btn.textContent = 'ok';
       showSubError(data.error);
     }
   } catch (e) {
+    showSubError('Falha de rede — tente novamente.');
+  } finally {
     btn.disabled = false;
-    btn.textContent = 'ok';
-    showSubError('Falha de rede — tente novamente');
+    btn.textContent = 'Inscrever';
   }
 }
 
-// Init theme button label
+// ── Início ──────────────────────────────────────────────────────────────
 try {
   const stored = localStorage.getItem('theme');
   const sysPref = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   const t = stored || sysPref;
-  document.getElementById('btn-theme').textContent = t === 'dark' ? 'light' : 'dark';
-} catch(e) {}
+  const btn = document.getElementById('btn-theme');
+  btn.textContent = rotuloTema(t);
+  btn.setAttribute('aria-label', `mudar para o tema ${rotuloTema(t)}`);
+} catch (e) { /* sem localStorage: fica o rótulo padrão */ }
 
 // Um listener só, por delegação (como no fotos): atributo `onclick` no HTML
 // é script inline, e a CSP não aceita. O botão diz o que faz em data-action.
 const ACOES = {
   tema: () => toggleTheme(),
   atualizar: () => runChecks(true),
-  'inscrever-abrir': () => showSubscribe(),
+  'inscrever-abrir': () => { if (document.getElementById('inscricao').hidden) showSubscribe(); else hideSubscribe(); },
   'inscrever-fechar': () => hideSubscribe(),
   inscrever: () => doSubscribe(),
   checks: (el) => toggleChecks(Number(el.dataset.i)),
+  barra: (el) => mostraBarra(el),
 };
 document.addEventListener('click', (ev) => {
   const el = ev.target instanceof Element ? ev.target.closest('[data-action]') : null;
@@ -653,8 +868,14 @@ document.addEventListener('click', (ev) => {
   ev.preventDefault();
   ACOES[el.dataset.action](el);
 });
+// Passar o mouse numa barra mostra o período, como o toque.
+document.addEventListener('pointerover', (ev) => {
+  const el = ev.target instanceof Element ? ev.target.closest('.b[data-action="barra"]') : null;
+  if (el) mostraBarra(el);
+});
 document.getElementById('sub-email').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') doSubscribe();
+  if (ev.key === 'Escape') hideSubscribe();
 });
 
 // Aba escondida: nada de rede. Ao voltar, atualiza na hora se o último dado
@@ -674,12 +895,7 @@ document.addEventListener('visibilitychange', () => {
   else { agendar(); updateLastChecked(); }
 });
 
-// Render and kick off checks
 renderSkeletons();
 renderThirdPartySkeletons();
-// Entrada escalonada das linhas pelo CSSOM (atributo de estilo a CSP barra).
-document.querySelectorAll('[data-atraso]').forEach(el => {
-  el.style.animation = `rise 0.9s cubic-bezier(0.16,1,0.3,1) ${el.dataset.atraso}s both`;
-});
 ageTimer = setInterval(updateLastChecked, 30000);
 runChecks();
