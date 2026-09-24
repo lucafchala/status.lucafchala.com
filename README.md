@@ -78,6 +78,8 @@ All probed with GET, following redirects, 10 s timeout, on every sweep (each cro
 | `treino.lucafchala.com` | page renders (content marker) — static single‑page tool, no backend |
 | `status.lucafchala.com` *(self)* | dashboard renders · own **`/api/healthz`** parsed — flags `STATUS_KV` / `RESEND_API_KEY` / `NOTIFY_TO` missing (the config drift that silently breaks alerting + subscriptions) and reports subscriber reach · **Resend delivery** verified against the live API (key still accepted, sender domain still verified, latency within budget). A *total* outage can't self‑report — the GitHub Actions monitor's non‑200 is the backstop. |
 
+**The fotos healthz contract:** every field this dashboard reads from fotos' `/api/healthz` is written in one place — [`docs/healthz-contrato.json`](https://github.com/lucafchala/fotos/blob/main/docs/healthz-contrato.json) in the fotos repo (field types, allowed values, fields removed on purpose, and an example payload), with `contrato: N` in the payload itself. fotos' test pins its real healthz to that file in both directions; here, `tests/contrato.test.mjs` downloads it (on every push, PR and **weekly** — fotos can change it without touching this repo) and runs the fotos parsers over the example wrapped in a `Proxy` that **discovers every field they read**, failing if one isn't in the contract (a hand-written list would be a third copy to drift, the way the README kept `hashMs` for months). A payload with a contract number this dashboard doesn't know turns the "configuração implantada" row **degraded** — an unknown meaning is not "ok". The same row shows the deployed fotos version (`versao.tag`, the commit's short SHA, from Cloudflare's version metadata), and with `STATUS_DB` each sweep stores it, so `/api/painel` lists the deploys in the 48 h window (`implantacoes`) for the timeline.
+
 **On data freshness:** age alone is *not* treated as a failure — a URL shortener can legitimately go months without a new redirect, so a staleness threshold would only manufacture alerts. What is flagged is unambiguous breakage: an **empty collection** (a build that published nothing over real data) or a **timestamp in the future** (a clock or publish bug). The age rides along in the detail (`3 itens · atualizado há 2d`) so a pipeline that quietly stopped is still visible at a glance.
 
 **On alert delivery:** the Resend check validates the key against the `/domains` endpoint rather than sending a test message. A real send per sweep would burn the free tier's 100 e‑mails/day and put an alert in the inbox every ten minutes — the opposite of what a monitor should do.
@@ -177,6 +179,7 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
     ├── painel.test.mjs              # /api/painel: subrequest budget, isolated sections, fixed cache key
     ├── retrato.test.mjs             # shared snapshot: visitors read, the lock bounds sweeps, bars never green by omission
     ├── agendador.test.mjs           # scheduler + watchdog: every branch of "is the alarm alive?"
+    ├── contrato.test.mjs            # what status.js reads from fotos' healthz vs. the contract fotos publishes
     └── d1.mjs                       # D1 over real SQLite (node:sqlite) for the tests
 ```
 

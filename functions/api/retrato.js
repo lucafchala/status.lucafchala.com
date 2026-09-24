@@ -48,7 +48,8 @@ const ESQUEMA = [
      origem TEXT NOT NULL,
      payload TEXT NOT NULL,
      st TEXT NOT NULL,
-     rt TEXT NOT NULL
+     rt TEXT NOT NULL,
+     versoes TEXT
    )`,
   'CREATE INDEX IF NOT EXISTS varredura_em ON varredura(em)',
   `CREATE TABLE IF NOT EXISTS dia (
@@ -111,10 +112,18 @@ export async function gravarVarredura(DB, payload, origem, agora = Date.now()) {
     // tempo de resposta que mede o NOSSO timeout, não o serviço.
     if (typeof s.rt === 'number' && Number.isFinite(s.rt) && s.status !== 'down') rt[s.name] = Math.round(s.rt);
   }
+  // Versão implantada que cada serviço declarou (hoje só o fotos, pelo
+  // healthz): é o que deixa a página marcar "deploy às HH:MM" na série.
+  const versoes = {};
+  for (const s of payload.services || []) {
+    const v = (s.checks || []).find((c) => c && c.versao)?.versao;
+    if (v) versoes[s.name] = v;
+  }
   const hoje = diaLocal(agora);
   const stmts = [
-    DB.prepare('INSERT INTO varredura (em, origem, payload, st, rt) VALUES (?, ?, ?, ?, ?)')
-      .bind(agora, origem, JSON.stringify(payload), JSON.stringify(st), JSON.stringify(rt)),
+    DB.prepare('INSERT INTO varredura (em, origem, payload, st, rt, versoes) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(agora, origem, JSON.stringify(payload), JSON.stringify(st), JSON.stringify(rt),
+        Object.keys(versoes).length ? JSON.stringify(versoes) : null),
   ];
   for (const [nome, estado] of Object.entries(st)) {
     const up = estado === 'up' ? 1 : 0;
@@ -136,15 +145,36 @@ export async function gravarVarredura(DB, payload, origem, agora = Date.now()) {
 // resume (`{ at, rt }`), mais o status de cada serviço para o uptime.
 export async function lerSerie(DB, agora = Date.now()) {
   await garantirEsquema(DB);
-  const { results } = await DB.prepare('SELECT em, st, rt FROM varredura WHERE em >= ? ORDER BY em DESC')
+  const { results } = await DB.prepare('SELECT em, st, rt, versoes FROM varredura WHERE em >= ? ORDER BY em DESC')
     .bind(agora - JANELA_MS).all();
   const out = [];
   for (const r of results || []) {
     try {
-      out.push({ at: new Date(Number(r.em)).toISOString(), st: JSON.parse(r.st), rt: JSON.parse(r.rt) });
+      out.push({
+        at: new Date(Number(r.em)).toISOString(), st: JSON.parse(r.st), rt: JSON.parse(r.rt),
+        versoes: r.versoes ? JSON.parse(r.versoes) : null,
+      });
     } catch { /* linha ilegível não derruba a série */ }
   }
   return out;
+}
+
+// Deploys dentro da série: cada vez que a versão declarada por um serviço
+// muda entre duas varreduras. O instante é o `em` da versão (quando a
+// Cloudflare a criou), não o da varredura que a viu primeiro — que pode ser
+// 10 min depois. Série vem mais nova primeiro.
+export function implantacoesDe(serie) {
+  const out = [];
+  const vistas = new Map();
+  for (const e of [...serie].reverse()) {
+    for (const [nome, v] of Object.entries(e.versoes || {})) {
+      if (!v || !v.id) continue;
+      const antes = vistas.get(nome);
+      if (antes && antes !== v.id) out.push({ servico: nome, tag: v.tag || null, id: v.id, em: v.em || e.at });
+      vistas.set(nome, v.id);
+    }
+  }
+  return out.reverse();
 }
 
 // Disponibilidade por serviço numa janela: fração das varreduras em que ele
