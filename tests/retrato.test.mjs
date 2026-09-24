@@ -243,6 +243,21 @@ describe('o que o D1 guarda', () => {
   });
 });
 
+describe('deploys na série', () => {
+  test('a versão declarada pelo fotos vira marcador quando muda, com a hora da versão', async () => {
+    const DB = d1Sqlite();
+    const svc = (id, tag, em) => ({ services: [{ name: 'Fotos', status: 'up', rt: 100, checks: [{ label: 'configuração implantada', status: 'up', detail: '', versao: { id, tag, em } }] }] });
+    const t = Date.now();
+    await retrato.gravarVarredura(DB, svc('v1', 'aaa1111', '2026-09-24T08:00:00.000Z'), 'agendador', t - 3 * 3600_000);
+    await retrato.gravarVarredura(DB, svc('v1', 'aaa1111', '2026-09-24T08:00:00.000Z'), 'agendador', t - 2 * 3600_000);
+    await retrato.gravarVarredura(DB, svc('v2', 'bbb2222', '2026-09-24T10:55:00.000Z'), 'agendador', t - 1 * 3600_000);
+    const serie = await retrato.lerSerie(DB, t);
+    assert.deepEqual(retrato.implantacoesDe(serie), [
+      { servico: 'Fotos', tag: 'bbb2222', id: 'v2', em: '2026-09-24T10:55:00.000Z' },
+    ]);
+  });
+});
+
 describe('barras sem D1, do log de transições', () => {
   const H = 3600_000;
   test('reconstrói o estado de cada hora a partir do estado atual e das transições', () => {

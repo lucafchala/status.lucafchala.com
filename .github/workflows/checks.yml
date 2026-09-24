@@ -2,6 +2,11 @@ name: checks
 on:
   push:
   pull_request:
+  # Toda semana também: tests/contrato.test.mjs confere o que este painel lê
+  # contra o contrato do healthz que o FOTOS publica, e o fotos pode mudar o
+  # contrato sem ninguém tocar neste repositório.
+  schedule:
+    - cron: '23 9 * * 1'
 
 jobs:
   checks:
@@ -32,6 +37,9 @@ jobs:
         # silêncio: CSRF e trava por IP no /api/subscribe, o GET do
         # /api/unsubscribe que não pode mais apagar ninguém, e o escape da
         # página que mostra o endereço de quem cancelou.
+        # tests/contrato.test.mjs baixa docs/healthz-contrato.json do fotos
+        # (repositório público) e reprova se status.js ler um campo que o
+        # contrato não tem, ou se o número do contrato mudou.
         run: node --test tests/*.test.mjs
 
       - name: JS module syntax check (functions)

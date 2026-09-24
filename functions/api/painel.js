@@ -19,7 +19,7 @@ import { verificarTerceiros } from './third-party-status.js';
 import { lerCotas } from './quota-stats.js';
 import { resumoHistorico, linhaDoTempo, barrasHorarias, uptimeTransicoes } from './status-history.js';
 import { resumoLatencia, resumoDeEntradas } from './latency-trends.js';
-import { lerRetrato, lerSerie, lerBarrasDiarias, uptimeDe, RETRATO_TTL_MS } from './retrato.js';
+import { lerRetrato, lerSerie, lerBarrasDiarias, uptimeDe, implantacoesDe, RETRATO_TTL_MS } from './retrato.js';
 
 // Mesma ordem de grandeza do que ele agrega: o histórico e a latência só mudam
 // quando uma varredura roda, terceiros e cotas têm cache próprio de 2 e 5 min.
@@ -71,6 +71,7 @@ async function comRetrato(context, DB) {
       h24: uptimeDe(serie, agora - 24 * 3600_000),
       h48: uptimeDe(serie, agora - 48 * 3600_000),
     },
+    implantacoes: implantacoesDe(serie),
   };
 }
 
@@ -114,6 +115,9 @@ export async function montarPainel(context) {
     latencia: serie.latencia ?? { erro: 'não foi possível ler agora' },
     barras: serie.barras ?? { erro: 'não foi possível ler agora' },
     uptime: serie.uptime ?? null,
+    // Deploys vistos na série de 48 h (só com o retrato em D1; sem ele não
+    // há histórico de versões, só a versão atual na linha do serviço).
+    implantacoes: serie.implantacoes ?? [],
     // A página decide por aqui se ainda precisa chamar /api/status.
     retratoCompartilhado,
     geradoEm: new Date().toISOString(),

@@ -315,11 +315,41 @@ export function healthSelftest(label, h) {
 // it again would double-count. Its value is that the panel states the deployed
 // configuration outright, instead of leaving it to be inferred from what didn't
 // break — which is how a drifted Terms version between the two repos hides.
+// Versão do CONTRATO do healthz do fotos que este painel sabe ler. O contrato
+// mora num lugar só — docs/healthz-contrato.json, no repositório do fotos — e
+// tests/contrato.test.mjs baixa aquele arquivo e reprova se este número
+// divergir ou se alguma função daqui ler um campo que ele não tem.
+export const CONTRATO_HEALTHZ_CONHECIDO = 1;
+
+function quando(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  return new Date(t).toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+}
+
 export function healthConfig(label, h) {
   if (h.rateLimited || h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
   const j = h.json;
+  // Contrato que este painel não conhece: um campo pode ter mudado de
+  // sentido, e ler como antes daria verde errado. Não é o fotos que está mal
+  // — é o monitor que ficou para trás —, mas é degradado do mesmo jeito:
+  // desconhecido não é "ok".
+  if (typeof j.contrato === 'number' && j.contrato !== CONTRATO_HEALTHZ_CONHECIDO) {
+    return {
+      label, status: 'degraded',
+      detail: `contrato do healthz ${j.contrato}, este painel lê o ${CONTRATO_HEALTHZ_CONHECIDO} — atualize functions/api/status.js`,
+    };
+  }
+  // A versão que respondeu (binding de version metadata do fotos): a etiqueta
+  // é o SHA curto do commit. Vai também como campo à parte na linha, para o
+  // retrato guardar e a página marcar o deploy na linha do tempo.
+  const v = j.versao && typeof j.versao === 'object' && typeof j.versao.id === 'string' ? j.versao : null;
+  const versao = v ? { id: v.id, tag: typeof v.tag === 'string' ? v.tag : null, em: typeof v.em === 'string' ? v.em : null } : null;
   const c = j.config;
   const bits = [];
+  if (versao) bits.push(`versão ${versao.tag || versao.id.slice(0, 8)}${versao.em ? ` de ${quando(versao.em)}` : ''}`);
   if (c) {
     const wired = [];
     if (c.turnstile)  wired.push('Turnstile');
@@ -330,13 +360,15 @@ export function healthConfig(label, h) {
   }
   if (j.termsVersion) bits.push(`termos ${j.termsVersion}`);
   if (j.country) bits.push(j.country);
-  return { label, status: 'up', detail: bits.length ? bits.join(' · ') : 'sem config (healthz antigo)' };
+  const row = { label, status: 'up', detail: bits.length ? bits.join(' · ') : 'sem config (healthz antigo)' };
+  if (versao) row.versao = versao;
+  return row;
 }
 
 // Row 3 — deep-probe a real event page (the healthy slug fotos nominates): the
 // Drive-access gate and the removal form must both render. Sends the per-event
 // view cookie so this monitoring hit never inflates the view counter.
-async function checkEventPage(label, h, base) {
+export async function checkEventPage(label, h, base) {
   const slug = h && h.json && h.json.selftest && h.json.selftest.sample;
   if (!slug) return { label, status: 'up', detail: 'sem evento p/ testar' };
   try {
