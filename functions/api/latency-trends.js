@@ -11,12 +11,13 @@
 // módulo só o guarda.
 //
 // ORÇAMENTO DE ESCRITA — a restrição que define o desenho:
-// a varredura roda de 5 em 5 minutos (288/dia) e as escritas em KV são o limite
-// mais apertado do plano gratuito (1000/dia, compartilhado com o site de fotos).
-// Gravar a cada varredura custaria 288 escritas/dia, ~29% da cota inteira, para
-// uma série temporal que ninguém olha nesse detalhe. Por isso a amostra é
-// gravada no máximo a cada 30 minutos: 48 escritas/dia (~5% da cota) e ainda
-// assim 96 pontos por janela de 48h, de sobra para enxergar tendência.
+// as escritas em KV são o limite mais apertado do plano gratuito (1000/dia,
+// compartilhado com o site de fotos), e varredura acontece a cada disparo do
+// cron (10 min, nominal) e a cada pedido de visitante que erra o cache. Gravar
+// a cada varredura custaria de 144 a milhares de escritas/dia para uma série
+// temporal que ninguém olha nesse detalhe. Por isso a amostra é gravada no
+// máximo a cada ~30 minutos: ~48 escritas/dia (~5% da cota) e ainda assim 96
+// pontos por janela de 48h, de sobra para enxergar tendência.
 
 export const LATENCY_KEY = 'latency';
 export const LATENCY_WINDOW_MS = 48 * 3600_000; // mesma janela do histórico
@@ -25,13 +26,18 @@ export const LATENCY_MAX = 96;                  // 48h ÷ 30min — limita o tam
 
 // Recorta por janela e por quantidade, mais novo primeiro. Exportado para que o
 // escritor (em /api/status) e o leitor (aqui) nunca discordem sobre o formato.
+// Amostra com carimbo no futuro (além de um minuto de folga de relógio) sai:
+// ela ficaria no topo da série até o relógio alcançá-la, e shouldSample leria
+// "a última amostra é nova" durante todo esse tempo — nenhuma amostra nova
+// entraria.
+export const LATENCY_FUTURE_SKEW_MS = 60_000;
 export function trimLatency(entries, now = Date.now()) {
   if (!Array.isArray(entries)) return [];
   return entries
     .filter((e) => e && typeof e.at === 'string' && e.rt && typeof e.rt === 'object')
     .filter((e) => {
       const t = new Date(e.at).getTime();
-      return Number.isFinite(t) && now - t <= LATENCY_WINDOW_MS;
+      return Number.isFinite(t) && now - t <= LATENCY_WINDOW_MS && t - now <= LATENCY_FUTURE_SKEW_MS;
     })
     .sort((a, b) => new Date(b.at) - new Date(a.at))
     .slice(0, LATENCY_MAX);
@@ -49,14 +55,30 @@ export async function readLatency(KV) {
   }
 }
 
-// Decide se já passou tempo suficiente desde a última amostra usando apenas
-// tempo — zero KV reads. A varredura roda a cada 5 min (288/dia); com amostras
-// a cada 30 min (48/dia), qualquer hora X do dia sempre produz amostra se
-// (X % 30min) < 5min. Fico ao lado do custo porque essa *é* a regra de cadência.
-export function shouldSample(now = Date.now()) {
-  // Que múltiplo de 30min o relógio passou? Se é o primeiro de cada período
-  // (primeiros 5 min em que a varredura roda), amostrar.
-  return (now % LATENCY_INTERVAL_MS) < 5 * 60_000;
+// Decide pela IDADE da amostra mais nova, não pelo relógio.
+//
+// A versão anterior amostrava quando a varredura caía nos 5 primeiros minutos
+// de cada meia hora — `(now % 30min) < 5min` —, o que só funciona se houver
+// exatamente UMA varredura por janela de 5 min. Em produção nunca houve:
+//   • o cron do GitHub, prometido a cada 10 min, rodava a cada ~3 h e quase
+//     nunca caía na janela: 3 amostras em 48 h no lugar de 96;
+//   • com o painel aberto (uma varredura por minuto), caíam CINCO por janela,
+//     e cada uma gravava: ~240 escritas/dia no lugar de 48.
+// Olhar a série custa a leitura de KV que a gravação já fazia, e dá as duas
+// garantias de uma vez: nunca mais de uma amostra por intervalo, e nunca uma
+// janela perdida porque a varredura atrasou.
+//
+// A folga absorve o atraso normal entre disparos: com o cron a cada 10 min,
+// a terceira varredura depois de uma amostra acontece com a amostra "quase"
+// 30 min velha, e sem folga a cadência escorregaria para 40 min. Um minuto
+// basta para o atraso de segundos de um cron, e põe o pior caso (varredura a
+// cada minuto, painel aberto) em uma amostra a cada 29 min: no máximo 50/dia.
+export const LATENCY_SLACK_MS = 60_000;
+export function shouldSample(series, now = Date.now()) {
+  // `series` chega de trimLatency: mais nova primeiro, sem carimbo no futuro.
+  const newest = Array.isArray(series) && series[0] ? new Date(series[0].at).getTime() : NaN;
+  if (!Number.isFinite(newest)) return true; // série vazia: primeira amostra
+  return now - newest >= LATENCY_INTERVAL_MS - LATENCY_SLACK_MS;
 }
 
 // Monta a amostra a partir dos serviços da varredura. Só entra quem tem `rt`

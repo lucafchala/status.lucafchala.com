@@ -171,9 +171,15 @@ async function collectCerts(token, accountTag) {
       // body with no `result`, which would otherwise read as "this zone has no
       // certificate" — sending someone to hunt a certificate problem when the
       // real fix is a missing scope on the API token.
+      //
+      // E "não consegui ler" é `unknown`, não `degraded`: um token sem o escopo
+      // de SSL deixava o TLS permanentemente amarelo, o painel de cotas inteiro
+      // `degraded`, e a linha entrava no rastreio de transições como se o
+      // certificado tivesse problema. Desconhecido aparece como desconhecido,
+      // com o motivo — nem verde por omissão, nem alarme inventado.
       if (!packs?.success) {
         const why = packs?.errors?.[0]?.message || 'resposta inesperada da API';
-        return { zone: z.name, status: 'degraded', detail: `não verificado (${why})` };
+        return { zone: z.name, status: 'unknown', detail: `não verificado (${why})` };
       }
 
       const active = (packs.result || []).filter(p => p.status === 'active');
@@ -196,7 +202,7 @@ async function collectCerts(token, accountTag) {
       if (days < CERT_WARN_DAYS)   return { zone: z.name, status: 'degraded', detail: `expira em ${days}d (renovação travada?)`, days };
       return { zone: z.name, status: 'up', detail: `válido +${days}d`, days };
     } catch (e) {
-      return { zone: z.name, status: 'degraded', detail: `não verificado (${e.message})` };
+      return { zone: z.name, status: 'unknown', detail: `não verificado (${e.message})` };
     }
   }));
   return out;
@@ -256,7 +262,7 @@ export async function onRequestGet(context) {
 
   const [usageResult, certs] = await Promise.all([
     collectUsage(token, accountTag).catch(e => ({ usage: {}, errors: [e.message] })),
-    collectCerts(token, accountTag).catch(e => [{ zone: '—', status: 'degraded', detail: `não verificado (${e.message})` }]),
+    collectCerts(token, accountTag).catch(e => [{ zone: '—', status: 'unknown', detail: `não verificado (${e.message})` }]),
   ]);
 
   const quotas = buildQuotas(usageResult.usage);
