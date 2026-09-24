@@ -383,7 +383,7 @@ function renderBarras(barras) {
     el.setAttribute('aria-label',
       `${s.name}, últimos ${n} ${unidade}: ${pct == null ? 'sem dados' : fmtPct(pct) + ' disponível'}` +
       `${conta.down ? `; ${conta.down} ${diario ? 'dias' : 'horas'} com queda` : ''}` +
-      `${conta.degraded ? `; ${conta.degraded} ${diario ? 'dias' : 'horas'} degradados` : ''}` +
+      `${conta.degraded ? `; ${conta.degraded} ${diario ? 'dias degradados' : 'horas degradadas'}` : ''}` +
       `${conta.nd ? `; ${conta.nd} sem dado` : ''}`);
     if (ini) ini.innerHTML = diario
       ? `<span class="so-largo">${n} dias atrás</span><span class="so-estreito">30 dias atrás</span>`
