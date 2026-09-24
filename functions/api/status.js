@@ -142,42 +142,57 @@ function humanAge(ms) {
 // published nothing over real data) or a timestamp in the future (a clock or
 // publish bug) — while the age rides along in the detail so a pipeline that
 // quietly stopped is still visible at a glance.
-async function checkFreshness(label, url, { collection, timestampFields = ['updatedAt', 'createdAt', 'date', 'time'] } = {}) {
-  try {
-    const res = await fetchSvc(url, { headers: { Accept: 'application/json' } });
-    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
-    if (!res.ok)           { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+function avaliarFrescor(label, json, lastModHeader, { collection, timestampFields = ['updatedAt', 'createdAt', 'date', 'time'] } = {}) {
+  const items = json && collection ? json[collection] : null;
+  if (!Array.isArray(items)) return { label, status: 'degraded', detail: `coleção "${collection}" ausente` };
+  if (items.length === 0)    return { label, status: 'degraded', detail: 'coleção vazia (publicação quebrada?)' };
 
-    const lastModHeader = res.headers.get('last-modified');
-    const text = await res.text();
-    let json;
-    try { json = JSON.parse(text); } catch { return { label, status: 'degraded', detail: 'JSON inválido' }; }
-
-    const items = json && collection ? json[collection] : null;
-    if (!Array.isArray(items)) return { label, status: 'degraded', detail: `coleção "${collection}" ausente` };
-    if (items.length === 0)    return { label, status: 'degraded', detail: 'coleção vazia (publicação quebrada?)' };
-
-    let updatedAt = lastModHeader ? new Date(lastModHeader).getTime() : NaN;
-    if (!Number.isFinite(updatedAt)) {
-      const stamps = items
-        .flatMap(it => (it && typeof it === 'object' ? timestampFields.map(f => it[f]) : []))
-        .map(v => new Date(v).getTime())
-        .filter(Number.isFinite);
-      updatedAt = stamps.length ? Math.max(...stamps) : NaN;
-    }
-
-    if (!Number.isFinite(updatedAt)) return { label, status: 'up', detail: `${items.length} itens · sem carimbo de data` };
-
-    const age = Date.now() - updatedAt;
-    // A minute of slack absorbs ordinary clock skew between hosts; anything
-    // beyond that is a genuinely wrong timestamp, not a rounding artifact.
-    if (age < -60_000) return { label, status: 'degraded', detail: `carimbo no futuro (${humanAge(-age)} à frente)` };
-
-    const stale = age > FRESHNESS_STALE_MS ? ' (parado?)' : '';
-    return { label, status: 'up', detail: `${items.length} itens · atualizado há ${humanAge(age)}${stale}` };
-  } catch (e) {
-    return { label, status: 'down', detail: netDetail(e) };
+  let updatedAt = lastModHeader ? new Date(lastModHeader).getTime() : NaN;
+  if (!Number.isFinite(updatedAt)) {
+    const stamps = items
+      .flatMap(it => (it && typeof it === 'object' ? timestampFields.map(f => it[f]) : []))
+      .map(v => new Date(v).getTime())
+      .filter(Number.isFinite);
+    updatedAt = stamps.length ? Math.max(...stamps) : NaN;
   }
+
+  if (!Number.isFinite(updatedAt)) return { label, status: 'up', detail: `${items.length} itens · sem carimbo de data` };
+
+  const age = Date.now() - updatedAt;
+  // A minute of slack absorbs ordinary clock skew between hosts; anything
+  // beyond that is a genuinely wrong timestamp, not a rounding artifact.
+  if (age < -60_000) return { label, status: 'degraded', detail: `carimbo no futuro (${humanAge(-age)} à frente)` };
+
+  const stale = age > FRESHNESS_STALE_MS ? ' (parado?)' : '';
+  return { label, status: 'up', detail: `${items.length} itens · atualizado há ${humanAge(age)}${stale}` };
+}
+
+// O arquivo de dados de Dash, Paste e URL alimenta DUAS linhas — "é JSON
+// válido com a coleção?" e "está fresco?" — e era buscado duas vezes, uma por
+// linha: três subrequests por varredura pagando pelo mesmo arquivo. Uma busca,
+// duas linhas. Erro de rede ou HTTP vale para as duas, como antes.
+function checkDados(labelJson, labelFrescor, url, validate, opts) {
+  const busca = (async () => {
+    try {
+      const res = await fetchSvc(url, { headers: { Accept: 'application/json' } });
+      if (res.status >= 500) { res.body?.cancel(); return { erro: { status: 'down', detail: `HTTP ${res.status}` } }; }
+      if (!res.ok)           { res.body?.cancel(); return { erro: { status: 'degraded', detail: `HTTP ${res.status}` } }; }
+      const lastMod = res.headers.get('last-modified');
+      const text = await res.text();
+      try { return { json: JSON.parse(text), lastMod }; } catch { return { erro: { status: 'degraded', detail: 'JSON inválido' } }; }
+    } catch (e) {
+      return { erro: { status: 'down', detail: netDetail(e) } };
+    }
+  })();
+  return [
+    busca.then((r) => {
+      if (r.erro) return { label: labelJson, ...r.erro };
+      const problem = validate ? validate(r.json) : null;
+      if (problem) return { label: labelJson, status: problem.status || 'degraded', detail: problem.detail };
+      return { label: labelJson, status: 'up', detail: '' };
+    }),
+    busca.then((r) => (r.erro ? { label: labelFrescor, ...r.erro } : avaliarFrescor(labelFrescor, r.json, r.lastMod, opts))),
+  ];
 }
 
 // Alert delivery is the one failure the dashboard cannot discover by failing:
@@ -544,6 +559,58 @@ async function checkStatusCode(label, url, expected) {
   }
 }
 
+// O mesmo Worker do fotos, sem as regras da zona lucafchala.com (WAF, bot
+// fight mode). Ver o comentário das sondas profundas do fotos em SERVICES.
+export const FOTOS_WORKERS_DEV = 'https://fotos.lucafchala.workers.dev';
+
+// Intervalo máximo entre duas conferências de uma sonda estática do fotos
+// (o que mora no bundle do Worker), quando a versão implantada não mudou.
+export const ESTATICAS_TTL_MS = 3 * 3600_000;
+
+// Linha da varredura anterior que ainda vale para esta: mesma versão
+// implantada, conferida há menos de ESTATICAS_TTL_MS, e VERDE — uma linha com
+// problema é reconferida em toda varredura, para a recuperação aparecer na
+// hora. Sem versão conhecida (healthz antigo, binding ausente, healthz fora do
+// ar), nada é reaproveitado: sem saber se houve deploy, sonda-se.
+export function reaproveitavel(anterior, label, versaoId, agora = Date.now()) {
+  if (!versaoId || !anterior || !Array.isArray(anterior.checks)) return null;
+  const c = anterior.checks.find((x) => x && x.label === label);
+  if (!c || c.status !== 'up' || c.versaoId !== versaoId) return null;
+  const em = Date.parse(c.verificadoEm);
+  if (!Number.isFinite(em) || agora - em > ESTATICAS_TTL_MS || em > agora) return null;
+  return c;
+}
+
+function estatica(label, health, anterior, run) {
+  return health.then(async (h) => {
+    const versaoId = h && h.json && h.json.versao && typeof h.json.versao.id === 'string' ? h.json.versao.id : null;
+    const velha = reaproveitavel(anterior, label, versaoId);
+    if (velha) return { ...velha };
+    const r = await run();
+    return { ...r, verificadoEm: new Date().toISOString(), versaoId };
+  });
+}
+
+// O visitante chega pelo domínio próprio; o workers.dev é o mesmo Worker sem
+// a zona na frente. Comparar os dois diz ONDE está a falha:
+//   • domínio 403/429 e Worker bem → é a zona barrando (WAF, bot fight mode):
+//     o site está de pé, e a sonda — ou o visitante — está sendo recusada;
+//   • domínio sem resposta ou 5xx e Worker bem → rota, DNS ou TLS da zona;
+//   • os dois mal → é o site.
+// Degradado quando só o domínio falha: o visitante esbarra na mesma coisa, e
+// a linha principal já diz o quê; esta diz por quê.
+export function dominioOuWorker(label, primary, h) {
+  const workerOk = !!(h && h.json && h.status === 200 && h.json.ok === true);
+  const dominioOk = primary.status === 'up' || (primary.statusCode != null && primary.statusCode < 400);
+  if (dominioOk) return { label, status: 'up', detail: workerOk ? 'mesmo Worker nos dois endereços' : '' };
+  if (!workerOk) return { label, status: 'up', detail: 'os dois endereços falham: é o site, não a zona' };
+  const code = primary.statusCode;
+  if (code === 403 || code === 429) {
+    return { label, status: 'degraded', detail: `domínio próprio respondeu ${code}, o Worker responde pelo workers.dev: a zona (WAF/bot) está barrando, não o site` };
+  }
+  return { label, status: 'degraded', detail: `domínio próprio ${code ? `HTTP ${code}` : 'sem resposta'}, o Worker responde pelo workers.dev: rota, DNS ou TLS da zona` };
+}
+
 export const SERVICES = [
   {
     name: 'lucafchala.com', url: 'https://lucafchala.com', marker: 'Luca',
@@ -562,23 +629,40 @@ export const SERVICES = [
     // it's the most-used service, so it's held to a stricter bar, not just a
     // deeper one.
     degradedMs: FOTOS_DEGRADED_MS,
-    checks: (b, env, primaryText) => {
+    checks: (b, env, primary, anterior) => {
+      // Sondas PROFUNDAS (healthz e página de evento) pelo workers.dev; o
+      // domínio próprio fica para o que o visitante vê — a sonda principal,
+      // os cabeçalhos, as páginas. É o que separa "o fotos caiu" de "o
+      // domínio está barrando a sonda" (WAF/bot da zona): o workers.dev é o
+      // MESMO Worker sem as regras da zona, o endereço que o smoke do deploy
+      // já usa pelo mesmo motivo. Não custa requisição a mais — só muda de
+      // onde vêm as duas que já existiam.
+      //
       // One healthz fetch, four derived rows (infra + self-test + deployed
       // config + event-page deep-probe): uma requisição a menos no fotos por
       // linha, não um rate limit a respeitar (o healthz não tem).
-      const health = fetchHealthz(b + '/api/healthz');
+      const health = fetchHealthz(FOTOS_WORKERS_DEV + '/api/healthz');
+      // Sondas do que MORA NO BUNDLE do Worker (páginas estáticas, manifest,
+      // ícones, robots, cabeçalhos): só mudam com um deploy, e todo deploy já
+      // passa pelo smoke. Rodam de novo quando a versão implantada muda ou a
+      // cada ESTATICAS_TTL_MS; no resto, a linha é a da varredura anterior,
+      // com a hora em que foi conferida. Eram 11 das 17 requisições que cada
+      // varredura fazia no fotos.
+      const est = (label, run) => estatica(label, health, anterior, run);
       return [
         health.then((h) => healthInfra('saúde · KV/D1/cron', h)),
         health.then((h) => healthSelftest('autoteste · dados/forms/Drive', h)),
         health.then((h) => healthConfig('configuração implantada', h)),
-        health.then((h) => checkEventPage('página de evento (Drive + remoção + preview)', h, b)),
+        health.then((h) => checkEventPage('página de evento (Drive + remoção + preview)', h, FOTOS_WORKERS_DEV)),
+        health.then((h) => dominioOuWorker('domínio próprio × workers.dev', primary, h)),
         // Headers are set by the shared html() helper on every HTML response, so we
         // assert them against the *static* /termos page (no KV read on fotos' side)
         // instead of the homepage, which would trigger a second events read.
         // Value-level, not presence-only: parsed against the literal policy
         // deployed in html() (src/index.js), so a weakened-but-present header
         // (a shortened HSTS, a loosened X-Frame-Options) is caught too.
-        checkSecurityHeaderValues('cabeçalhos de segurança (valores)', b + '/termos'),
+        // No domínio próprio: é lá que regra de zona pode mudar um cabeçalho.
+        est('cabeçalhos de segurança (valores)', () => checkSecurityHeaderValues('cabeçalhos de segurança (valores)', b + '/termos')),
         // The homepage marker above only proves the shell rendered; this proves
         // the gallery actually painted event cards, not an empty grid. Reuses
         // the primary probe's already-fetched body instead of a second GET to
@@ -592,29 +676,34 @@ export const SERVICES = [
         // failure — this one reports 'up' rather than double-counting it.
         {
           label: 'galeria — eventos renderizam',
-          status: primaryText == null || primaryText.includes('data-title="') ? 'up' : 'degraded',
-          detail: primaryText == null ? '—' : (primaryText.includes('data-title="') ? '' : 'grade sem cards de evento'),
+          status: primary.text == null || primary.text.includes('data-title="') ? 'up' : 'degraded',
+          detail: primary.text == null ? '—' : (primary.text.includes('data-title="') ? '' : 'grade sem cards de evento'),
         },
-        checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' }),
-        checkJson('manifest PWA', b + '/manifest.json', (j) => {
+        // O sitemap sai da lista de eventos (dado, não bundle): toda varredura.
+        checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
+        // /dashboard também é sondado como serviço próprio ("Fotos — Dashboard")
+        // a cada varredura; aqui ele entra só no ritmo das estáticas.
+        est('painel /dashboard', () => checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' })),
+        est('manifest PWA', () => checkJson('manifest PWA', b + '/manifest.json', (j) => {
           if (!j || !j.name) return { detail: 'manifest sem nome' };
           if (!Array.isArray(j.icons) || !j.icons.length || !j.icons[0].src) return { detail: 'manifest sem ícones' };
           if (!j.start_url)   return { detail: 'manifest sem start_url' };
           if (!j.theme_color) return { detail: 'manifest sem theme_color' };
           return null;
-        }),
-        checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' }),
-        checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' }),
-        checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
-        checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' }),
-        checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt'),
-        checkJson('GPC opt-out', b + '/.well-known/gpc.json', (j) => (j && j.gpc === true ? null : { detail: 'gpc≠true' })),
-        checkContent('termos (LGPD)', b + '/termos', { contentType: 'text/html', marker: 'Termos de Uso' }),
-        checkContent('privacidade', b + '/privacidade', { contentType: 'text/html', marker: 'Política de Privacidade' }),
+        })),
+        est('ícone PWA', () => checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' })),
+        est('og coming-soon', () => checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' })),
+        est('robots.txt', () => checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' })),
+        // Muda com o tempo (Expires), não com o deploy — mas a margem de aviso
+        // é de 14 dias; conferir a cada 3 h sobra.
+        est('security.txt (RFC 9116)', () => checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt')),
+        est('GPC opt-out', () => checkJson('GPC opt-out', b + '/.well-known/gpc.json', (j) => (j && j.gpc === true ? null : { detail: 'gpc≠true' }))),
+        est('termos (LGPD)', () => checkContent('termos (LGPD)', b + '/termos', { contentType: 'text/html', marker: 'Termos de Uso' })),
+        est('privacidade', () => checkContent('privacidade', b + '/privacidade', { contentType: 'text/html', marker: 'Política de Privacidade' })),
         // The support form is gated by a Turnstile widget; if its markup is gone
         // the form can't be submitted, so we assert the widget renders.
-        checkContent('formulário de suporte', b + '/suporte', { contentType: 'text/html', marker: 'cf-turnstile' }),
-        checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404),
+        est('formulário de suporte', () => checkContent('formulário de suporte', b + '/suporte', { contentType: 'text/html', marker: 'cf-turnstile' })),
+        est('roteamento (404)', () => checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404)),
       ];
     },
   },
@@ -623,24 +712,18 @@ export const SERVICES = [
   },
   {
     name: 'Dash', url: 'https://dash.lucafchala.com', marker: 'Painel',
-    checks: (b) => [
-      checkJson('data.json (PURLs)', b + '/data.json', (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' })),
-      checkFreshness('atualidade dos dados', b + '/data.json', { collection: 'redirects' }),
-    ],
+    checks: (b) => checkDados('data.json (PURLs)', 'atualidade dos dados', b + '/data.json',
+      (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' }), { collection: 'redirects' }),
   },
   {
     name: 'Paste', url: 'https://paste.lucafchala.com', marker: 'Paste',
-    checks: (b) => [
-      checkJson('pastes.json', b + '/pastes.json', (j) => (j && Array.isArray(j.pastes) ? null : { detail: 'lista de pastes inválida' })),
-      checkFreshness('atualidade dos dados', b + '/pastes.json', { collection: 'pastes' }),
-    ],
+    checks: (b) => checkDados('pastes.json', 'atualidade dos dados', b + '/pastes.json',
+      (j) => (j && Array.isArray(j.pastes) ? null : { detail: 'lista de pastes inválida' }), { collection: 'pastes' }),
   },
   {
     name: 'URL', url: 'https://url.lucafchala.com', marker: 'url.lucafchala.com',
-    checks: (b) => [
-      checkJson('data.json (redirects)', b + '/data.json', (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' })),
-      checkFreshness('atualidade dos dados', b + '/data.json', { collection: 'redirects' }),
-    ],
+    checks: (b) => checkDados('data.json (redirects)', 'atualidade dos dados', b + '/data.json',
+      (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' }), { collection: 'redirects' }),
   },
   {
     name: 'Keys', url: 'https://keys.lucafchala.com', marker: 'Chaves',
@@ -697,9 +780,9 @@ export const SERVICES = [
   },
 ];
 
-async function checkService(svc, env) {
+async function checkService(svc, env, anterior) {
   const primary = await probePrimary(svc.url, svc.marker, svc.degradedMs);
-  const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env, primary.text)) : [];
+  const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env, primary, anterior)) : [];
 
   const checks = [{ label: 'disponibilidade', status: primary.status, detail: primary.detail }, ...extra];
   let status = primary.status;
@@ -746,8 +829,12 @@ let _lastSweepAt = 0;
 /** @type {{ services: any[], checkedAt: string } | null} */
 let _lastSweep = null;
 
-export async function varrer(env) {
-  const services = await Promise.all(SERVICES.map((s) => checkService(s, env)));
+// `anterior` é a varredura anterior (o retrato do D1, ou a última deste
+// isolate sem ele): é de onde as sondas estáticas do fotos reaproveitam o
+// resultado enquanto a versão implantada não muda.
+export async function varrer(env, anterior = null) {
+  const antes = (nome) => (anterior && Array.isArray(anterior.services) ? anterior.services.find((x) => x && x.name === nome) : null) || null;
+  const services = await Promise.all(SERVICES.map((s) => checkService(s, env, antes(s.name))));
   return { services, checkedAt: new Date().toISOString() };
 }
 
@@ -791,7 +878,7 @@ async function comRetrato(context, DB) {
   const atrasado = idadeMs == null || idadeMs > RETRATO_TTL_MS;
 
   if ((pedido || atrasado) && await tomarVez(DB, agora)) {
-    const payload = await varrer(context.env);
+    const payload = await varrer(context.env, r ? r.payload : null);
     const origem = pedido || 'visitante (retrato atrasado)';
     const fim = Date.now();
     context.waitUntil(gravarVarredura(DB, payload, origem, fim)
@@ -851,7 +938,7 @@ async function semRetrato(context) {
     });
   }
 
-  const payload = await varrer(context.env);
+  const payload = await varrer(context.env, _lastSweep);
   const services = payload.services;
   _lastSweep = payload;
   _lastSweepAt = agora;
