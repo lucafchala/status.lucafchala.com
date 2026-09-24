@@ -83,15 +83,14 @@ function summarize(entries) {
   return out;
 }
 
-export async function onRequestGet(context) {
-  const KV = context.env.STATUS_KV;
-
+// Usada também pelo /api/painel. Devolve o objeto, não a Response.
+export async function resumoHistorico(KV) {
   if (!KV) {
-    return json({
+    return {
       available: false,
       detail: 'STATUS_KV ausente — histórico não é registrado',
       entries: [], services: {}, checkedAt: new Date().toISOString(),
-    });
+    };
   }
 
   const entries = await readHistory(KV);
@@ -105,7 +104,7 @@ export async function onRequestGet(context) {
     .map(([name, changes]) => ({ name, changes }))
     .sort((a, b) => b.changes - a.changes);
 
-  return json({
+  return {
     available: true,
     windowHours: HISTORY_WINDOW_MS / 3600_000,
     entries,
@@ -113,7 +112,11 @@ export async function onRequestGet(context) {
     flapping,
     worstSeverity: entries.reduce((acc, e) => (RANK[e.to] > RANK[acc] ? e.to : acc), 'up'),
     checkedAt: new Date().toISOString(),
-  });
+  };
+}
+
+export async function onRequestGet(context) {
+  return json(await resumoHistorico(context.env.STATUS_KV));
 }
 
 function json(data) {
@@ -121,8 +124,9 @@ function json(data) {
     headers: {
       'Content-Type': 'application/json',
       'X-Content-Type-Options': 'nosniff',
-      // Short edge cache: the log only changes on a real transition, but the
-      // dashboard polls this alongside /api/status every 60 s.
+      // Short edge cache: the log only changes on a real transition. (A página
+      // lê o histórico pelo /api/painel; esta rota fica para quem a consulta
+      // direto.)
       'Cache-Control': 'public, max-age=0, s-maxage=30',
     },
   });

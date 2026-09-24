@@ -238,19 +238,20 @@ function buildQuotas(usage) {
   });
 }
 
-export async function onRequestGet(context) {
+// Usada também pelo /api/painel. Devolve o objeto, não a Response.
+export async function lerCotas(context) {
   const { env } = context;
   const token = env.CF_API_TOKEN;
   const accountTag = env.CF_ACCOUNT_ID;
 
   if (!token || !accountTag) {
-    return json({
+    return {
       configured: false,
       // Spelled out so the panel can tell the operator exactly what to add
       // rather than just disappearing.
       detail: 'CF_API_TOKEN e CF_ACCOUNT_ID ausentes — cotas e certificados não monitorados',
       checkedAt: new Date().toISOString(),
-    }, 200, 300);
+    };
   }
 
   // Cached hard: quota counters move slowly, and every miss costs four GraphQL
@@ -258,7 +259,7 @@ export async function onRequestGet(context) {
   const cache = caches.default;
   const cacheKey = new Request(new URL(context.request.url).origin + '/api/quota-stats');
   const hit = await cache.match(cacheKey);
-  if (hit) return hit;
+  if (hit) return hit.json();
 
   const [usageResult, certs] = await Promise.all([
     collectUsage(token, accountTag).catch(e => ({ usage: {}, errors: [e.message] })),
@@ -270,7 +271,7 @@ export async function onRequestGet(context) {
     (acc, q) => (RANK[q.status] > RANK[acc] ? q.status : acc), 'up',
   );
 
-  const res = json({
+  const body = {
     configured: true,
     status: worst,
     quotas,
@@ -287,10 +288,14 @@ export async function onRequestGet(context) {
     errors: usageResult.errors,
     note: 'Cotas do plano gratuito, janela diária em UTC. Banda não é medida (Pages tem tráfego ilimitado).',
     checkedAt: new Date().toISOString(),
-  }, 200, 300);
+  };
 
-  context.waitUntil(cache.put(cacheKey, res.clone()));
-  return res;
+  context.waitUntil(cache.put(cacheKey, json(body, 200, 300)));
+  return body;
+}
+
+export async function onRequestGet(context) {
+  return json(await lerCotas(context), 200, 300);
 }
 
 function json(data, status = 200, sMaxAge = 0) {
