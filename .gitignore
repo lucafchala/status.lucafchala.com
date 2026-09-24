@@ -1,0 +1,3 @@
+# Estado local do wrangler (dev/dry-run): miniflare, bundles, cf.json.
+.wrangler/
+node_modules/

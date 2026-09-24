@@ -830,6 +830,10 @@ async function semRetrato(context) {
       'Content-Type': 'application/json',
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'public, max-age=0, s-maxage=30',
+      // Os mesmos dois cabeçalhos do caminho com retrato: o agendador e o
+      // vigia registram quem varreu e quão velho é o que receberam.
+      'X-Sweep-Age-Ms': '0',
+      'X-Sweep-Source': origemDoPedido(new URL(context.request.url)) || 'visitante',
     },
   });
   context.waitUntil(cache.put(cacheKey, res.clone()));

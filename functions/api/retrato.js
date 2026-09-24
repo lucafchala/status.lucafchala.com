@@ -208,6 +208,15 @@ export function barrasDiarias(porDia, agora = Date.now()) {
   return { tipo: 'diario', fonte: 'd1', periodos, servicos };
 }
 
+// Última varredura feita pelo agendador da Cloudflare (origem 'agendador'),
+// dentro da janela guardada. Usa o índice por `em`; lê no máximo as linhas
+// da janela (≤ 288 com o agendador de 10 min).
+export async function ultimaDoAgendador(DB) {
+  await garantirEsquema(DB);
+  const row = await DB.prepare("SELECT MAX(em) AS em FROM varredura WHERE origem = 'agendador'").first();
+  return row && row.em != null ? Number(row.em) : null;
+}
+
 // /api/retrato — só a idade do retrato. É o que um vigia de fora (o cron do
 // GitHub, o cron diário do fotos) consulta para saber se o agendador morreu,
 // sem varrer nada e sem baixar o retrato inteiro.
@@ -219,6 +228,7 @@ export async function onRequestGet(context) {
   }
   try {
     const r = await lerRetrato(DB);
+    const ag = await ultimaDoAgendador(DB);
     const agora = Date.now();
     const idadeMs = r ? agora - r.em : null;
     return new Response(JSON.stringify({
@@ -228,6 +238,13 @@ export async function onRequestGet(context) {
       idadeMs,
       atrasado: idadeMs == null || idadeMs > RETRATO_TTL_MS,
       ttlMs: RETRATO_TTL_MS,
+      // O vigia (monitor.yml) precisa separar "o agendador parou" de "o
+      // agendador nunca existiu" (Worker ainda não implantado): só o primeiro
+      // é alarme. Sem varredura dele na janela de 48 h, `ultimaEm` é null.
+      agendador: {
+        ultimaEm: ag ? new Date(ag).toISOString() : null,
+        idadeMs: ag ? agora - ag : null,
+      },
     }), { headers });
   } catch (e) {
     console.error('retrato: leitura falhou', e);

@@ -1,0 +1,27 @@
+# Agendador do status.lucafchala.com — ver index.js para o porquê.
+#
+# Implantação (uma vez, pelo dono; não há credencial da Cloudflare no CI):
+#   • pelo painel: Workers & Pages → Create → Import a repository →
+#     lucafchala/status.lucafchala.com, com "Root directory" = agendador.
+#     Daí em diante cada push na main reimplanta sozinho (Workers Builds);
+#   • ou da máquina: `cd agendador && npx wrangler deploy`.
+name = "status-agendador"
+main = "index.js"
+compatibility_date = "2026-09-01"
+account_id = "e5869d6881e992cf4681ce85583a6ab2"
+
+# Sem rota e sem endereço público: este Worker só existe para o cron.
+workers_dev = false
+preview_urls = false
+
+[triggers]
+# A cada 10 min. O /api/status só aceita uma varredura a cada 4 min para a
+# conta inteira (trava no D1), então um disparo duplicado não custa nada.
+# O plano gratuito permite 5 Cron Triggers por conta; o fotos usa 1.
+crons = ["*/10 * * * *"]
+
+# Declarado aqui, e não só no painel: `wrangler deploy` desliga o que não
+# estiver no arquivo (a mesma armadilha registrada no wrangler.toml do fotos).
+[observability]
+enabled = true
+head_sampling_rate = 1
