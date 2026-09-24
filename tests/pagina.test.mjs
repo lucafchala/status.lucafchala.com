@@ -88,3 +88,49 @@ describe('página de cancelamento (Function) × a mesma CSP', () => {
     assert.doesNotMatch(csp, /unsafe-inline/);
   });
 });
+
+// Contraste (WCAG 2.x) das cores do app.css, nos dois temas. As cores de
+// estado antigas não passavam — `--down` dava 2,6:1 no escuro, abaixo até dos
+// 3:1 de elemento gráfico — e ninguém percebe contraste ruim num teste de
+// função. Este lê os tokens do CSS e mede.
+function tokens(css, seletor) {
+  const bloco = css.slice(css.indexOf(seletor + ' {'));
+  const corpo = bloco.slice(bloco.indexOf('{') + 1, bloco.indexOf('}'));
+  return Object.fromEntries([...corpo.matchAll(/--([\w-]+):\s*(#[0-9a-f]{6})/gi)].map((m) => [m[1], m[2]]));
+}
+function luminancia(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contraste(a, b) {
+  const [x, y] = [luminancia(a), luminancia(b)].sort((p, q) => q - p);
+  return (x + 0.05) / (y + 0.05);
+}
+
+describe('contraste AA das cores do painel', () => {
+  const escuro = tokens(CSS, ':root');
+  const claro = { ...escuro, ...tokens(CSS, '[data-theme="light"]') };
+  for (const [nome, t] of [['escuro', escuro], ['claro', claro]]) {
+    test(`tema ${nome}: texto e estados ≥ 4,5:1 sobre o fundo e os painéis`, () => {
+      for (const fg of ['text', 'muted', 'accent', 'up', 'degraded', 'down']) {
+        for (const bg of ['bg', 'panel']) {
+          const c = contraste(t[fg], t[bg]);
+          assert.ok(c >= 4.5, `--${fg} sobre --${bg}: ${c.toFixed(2)}:1`);
+        }
+      }
+    });
+    test(`tema ${nome}: texto sobre as faixas coloridas e os ícones ≥ 4,5:1`, () => {
+      for (const s of ['up', 'degraded', 'down']) {
+        for (const fg of ['text', 'muted']) {
+          const c = contraste(t[fg], t[`${s}-fundo`]);
+          assert.ok(c >= 4.5, `--${fg} sobre --${s}-fundo: ${c.toFixed(2)}:1`);
+        }
+        const ic = contraste(t.bg, t[s]);
+        assert.ok(ic >= 4.5, `ícone (--bg) sobre --${s}: ${ic.toFixed(2)}:1`);
+      }
+      const botao = contraste(t.bg, t.accent);
+      assert.ok(botao >= 4.5, `botão primário (--bg sobre --accent): ${botao.toFixed(2)}:1`);
+    });
+  }
+});
