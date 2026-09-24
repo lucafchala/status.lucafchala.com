@@ -221,14 +221,22 @@ async function checkResend(label, env) {
 }
 
 // fotos exposes a deep /api/healthz: { ok, kv, events, d1, kvLatencyMs,
-// cron, selftest, config, colo, … }. We fetch it ONCE per sweep (it's rate-
-// limited to 10/min/IP) and derive THREE dashboard rows from that single
-// response: infra health, the functional self-test, and a deep-probe of a real
-// event page. Fields absent on an older healthz payload are simply skipped, so
-// this stays correct even when the two repos deploy independently.
+// d1LatencyMs, cron, selftest, config, termsVersion, colo, … }. We fetch it
+// ONCE per sweep and derive four dashboard rows from that single response:
+// infra health, the functional self-test, the deployed configuration, and a
+// deep-probe of a real event page. Fields absent on an older healthz payload
+// are simply skipped, so this stays correct even when the two repos deploy
+// independently.
+//
+// Uma busca só não é por causa de rate limit: o healthz do fotos NÃO tem
+// limite ("Sem rate limit de propósito", em handleHealthz). É por custo — cada
+// busca é uma requisição a mais no Worker do fotos e um subrequest a mais aqui.
 function fetchHealthz(url) {
   return fetchSvc(url, { headers: { Accept: 'application/json' } }).then(async (res) => {
-    // healthz is rate-limited; a 429 from our own sweep isn't an outage.
+    // Um 429 aqui não vem do fotos (que não limita o healthz): vem de alguma
+    // camada na frente dele — regra de WAF, rate limiting da zona. Já foi
+    // tratado como "ignorado" e virava verde; é o contrário do que se quer
+    // saber, porque o visitante esbarraria na mesma camada.
     if (res.status === 429) { res.body?.cancel(); return { rateLimited: true }; }
     const text = await res.text();
     try { return { status: res.status, json: JSON.parse(text) }; }
@@ -236,10 +244,12 @@ function fetchHealthz(url) {
   }).catch((e) => ({ netError: netDetail(e) }));
 }
 
-// Row 1 — pure infrastructure: KV binding/latency, D1, login hashing, the
+// Row 1 — pure infrastructure: KV binding/latency, D1 and its latency, the
 // daily-cron heartbeat. (Form/config problems live in the self-test row.)
-function healthInfra(label, h) {
-  if (h.rateLimited) return { label, status: 'up', detail: 'rate-limited (ignorado)' };
+// Não há tempo de hash: o fotos tirou o `hashMs` do payload porque o Workers
+// congela o relógio durante execução síncrona e o número era sempre 0.
+export function healthInfra(label, h) {
+  if (h.rateLimited) return { label, status: 'degraded', detail: 'HTTP 429 (o healthz não tem rate limit: bloqueio na frente do Worker?)' };
   if (h.netError)    return { label, status: 'down', detail: h.netError };
   if (h.parseError)  return { label, status: 'down', detail: 'healthz sem JSON' };
   const j = h.json;
@@ -274,11 +284,10 @@ function healthInfra(label, h) {
 // Drive links on live events, bad data (dup slugs, invalid status), and form
 // backends (Turnstile/Resend/ADMIN_EMAIL) that are unset. This is what flags
 // "something we changed went wrong" rather than just a hard 500.
-function healthSelftest(label, h) {
-  if (h.rateLimited) return { label, status: 'up', detail: 'rate-limited (ignorado)' };
-  // If healthz is unreachable/unparseable, the infra row already owns that
-  // outage — don't double-count it here.
-  if (h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
+export function healthSelftest(label, h) {
+  // If healthz is unreachable/unparseable/blocked, the infra row already owns
+  // that outage — don't double-count it here.
+  if (h.rateLimited || h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
   const st = h.json.selftest;
   if (!st) return { label, status: 'up', detail: 'autoteste indisponível (healthz antigo)' };
   if (Array.isArray(st.problems) && st.problems.length)
@@ -305,9 +314,8 @@ function healthSelftest(label, h) {
 // it again would double-count. Its value is that the panel states the deployed
 // configuration outright, instead of leaving it to be inferred from what didn't
 // break — which is how a drifted Terms version between the two repos hides.
-function healthConfig(label, h) {
-  if (h.rateLimited) return { label, status: 'up', detail: 'rate-limited (ignorado)' };
-  if (h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
+export function healthConfig(label, h) {
+  if (h.rateLimited || h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
   const j = h.json;
   const c = j.config;
   const bits = [];
@@ -522,11 +530,12 @@ export const SERVICES = [
     // deeper one.
     degradedMs: FOTOS_DEGRADED_MS,
     checks: (b, env, primaryText) => {
-      // One healthz fetch, three derived rows (infra + self-test + event-page
-      // deep-probe) — keeps us under the 10/min healthz rate limit.
+      // One healthz fetch, four derived rows (infra + self-test + deployed
+      // config + event-page deep-probe): uma requisição a menos no fotos por
+      // linha, não um rate limit a respeitar (o healthz não tem).
       const health = fetchHealthz(b + '/api/healthz');
       return [
-        health.then((h) => healthInfra('saúde · KV/D1/hash/cron', h)),
+        health.then((h) => healthInfra('saúde · KV/D1/cron', h)),
         health.then((h) => healthSelftest('autoteste · dados/forms/Drive', h)),
         health.then((h) => healthConfig('configuração implantada', h)),
         health.then((h) => checkEventPage('página de evento (Drive + remoção + preview)', h, b)),
@@ -772,7 +781,13 @@ const _fallback = { lastStatus: null, notifiedAt: new Map() };
 // Free-tier headroom joins change detection, so a limit that starts running out
 // reaches the inbox instead of waiting to be spotted on the dashboard. Fetched
 // over HTTP rather than recomputed, so the endpoint's own 5-minute edge cache
-// absorbs the cost of running this on every sweep (including the 10-min cron).
+// absorbs repeated sweeps that land in the same colo. (O cron, que roda a
+// intervalos maiores que 5 min, quase sempre erra esse cache: para ele esta
+// chamada custa uma invocação a mais de Pages Function por varredura.)
+//
+// Linha que a quota-stats não conseguiu LER (`unknown`) não entra: não é
+// problema de cota nem de certificado, e tratá-la como tal inventaria um
+// incidente. O motivo continua visível no painel e em `errors[]`.
 //
 // `quiesceOnRecovery` marks these as worsening-only: the daily counters reset at
 // UTC midnight, so a quota that peaked yesterday "recovers" every single night.
@@ -800,6 +815,7 @@ async function quotaEntries(origin) {
       });
     }
     for (const c of j.certs || []) {
+      if (c.status === 'unknown') continue;
       entries.push({
         name: `TLS · ${c.zone}`,
         status: c.status,
@@ -838,9 +854,10 @@ export async function detectAndNotify(env, services, origin) {
 
   // Write last_status ONLY when something actually changed. KV writes are the
   // tightest free-tier limit (1k/day, shared account-wide with the fotos site),
-  // and the sweep runs every 5 min from the cron — so an unconditional write was
-  // ~288 wasted writes/day on a value that rarely changes. Now: ~0 in steady
-  // state, a write only on a real transition.
+  // and a sweep runs on every cron tick plus every visitor poll that misses the
+  // cache — an unconditional write would be one write per sweep (144/day at the
+  // cron's nominal 10 min, far more with the dashboard open) on a value that
+  // rarely changes. Now: ~0 in steady state, a write only on a real transition.
   const next = {};
   let changed = false;
   for (const s of tracked) {
@@ -891,16 +908,19 @@ export async function detectAndNotify(env, services, origin) {
   // interessa acontece justamente enquanto o status não muda: um serviço que
   // saiu de 300ms para 1800ms segue verde e é o aviso mais antecipado de que
   // algo vai quebrar. A cadência (no máximo a cada 30 min) é o que mantém isso
-  // em ~48 escritas/dia em vez das 288 de uma gravação por varredura.
-  if (shouldSample()) {
-    try {
-      const series = await readLatency(KV);
+  // em ~48 escritas/dia (no máximo 50) qualquer que seja o ritmo das varreduras.
+  //
+  // A decisão lê a série antes (uma leitura de KV por varredura; leitura é
+  // 100× mais farta que escrita) em vez de olhar o relógio: ver shouldSample.
+  try {
+    const series = await readLatency(KV);
+    if (shouldSample(series)) {
       const sample = buildSample(services);
       if (sample) await KV.put(LATENCY_KEY, JSON.stringify(trimLatency([sample, ...series])));
-    } catch (e) {
-      // Telemetria nunca pode derrubar a varredura que ela observa.
-      console.error('latency sample failed', e);
     }
+  } catch (e) {
+    // Telemetria nunca pode derrubar a varredura que ela observa.
+    console.error('latency sample failed', e);
   }
 
   if (!env.RESEND_API_KEY || !env.NOTIFY_TO) return;
