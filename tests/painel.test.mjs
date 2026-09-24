@@ -126,6 +126,9 @@ describe('/api/quota-stats — o que a Cloudflare já mede de cada Worker', () =
           if (doQuebrado) return new Response(JSON.stringify({ errors: [{ message: 'unknown field' }] }));
           return new Response(JSON.stringify({ data: { viewer: { accounts: [{ durableObjectsInvocationsAdaptiveGroups: [{ sum: { requests: 340 }, dimensions: { scriptName: 'fotos' } }] }] } } }));
         }
+        if (q.includes('pagesFunctionsInvocationsAdaptiveGroups')) {
+          return new Response(JSON.stringify({ data: { viewer: { accounts: [{ pagesFunctionsInvocationsAdaptiveGroups: [{ sum: { requests: 400, errors: 2 }, dimensions: { scriptName: 'x' } }] }] } } }));
+        }
         if (q.includes('datetimeHour')) {
           return new Response(JSON.stringify({ data: { viewer: { accounts: [{ workersInvocationsAdaptive: [
             { sum: { requests: 100, errors: 0 }, quantiles: { cpuTimeP99: 4100 }, dimensions: { datetimeHour: '2026-09-24T10:00:00Z' } },
@@ -149,7 +152,7 @@ describe('/api/quota-stats — o que a Cloudflare já mede de cada Worker', () =
   test('detalhe por Worker, com taxa de erro e CPU em ms, maior primeiro', async () => {
     cloudflare();
     const body = await quota.lerCotas(ctx());
-    assert.deepEqual(body.porWorker.map((w) => w.script), ['status-agendador', 'fotos']);
+    assert.deepEqual(body.porWorker.map((w) => w.script), ['status-agendador', 'Pages Functions', 'fotos']);
     const fotos = body.porWorker.find((w) => w.script === 'fotos');
     assert.equal(fotos.errosPct, 2.22);
     assert.equal(fotos.cpuP50Ms, 1.2);
@@ -157,8 +160,8 @@ describe('/api/quota-stats — o que a Cloudflare já mede de cada Worker', () =
     assert.equal(body.workerPorHora.script, 'fotos');
     assert.equal(body.workerPorHora.horas.length, 2);
     assert.equal(body.durableObjects.requests, 340);
-    // Somas de cota continuam as mesmas.
-    assert.equal(body.quotas.find((q) => q.key === 'workerRequests').used, 1080);
+    // A cota de requisições é da conta: Workers (1080) + Pages Functions (400).
+    assert.equal(body.quotas.find((q) => q.key === 'workerRequests').used, 1480);
   });
 
   test('consulta nova que falha custa só a própria linha', async () => {
@@ -166,7 +169,7 @@ describe('/api/quota-stats — o que a Cloudflare já mede de cada Worker', () =
     const body = await quota.lerCotas(ctx());
     assert.equal(body.durableObjects, null);
     assert.ok(body.errors.some((e) => /Durable Objects/.test(e)));
-    assert.ok(body.porWorker.length === 2, 'o resto segue');
-    assert.equal(body.quotas.find((q) => q.key === 'workerRequests').used, 1080);
+    assert.ok(body.porWorker.length === 3, 'o resto segue');
+    assert.equal(body.quotas.find((q) => q.key === 'workerRequests').used, 1480);
   });
 });
