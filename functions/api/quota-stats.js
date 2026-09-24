@@ -30,7 +30,7 @@ const LIMITS = {
   kvDeletes:      { limit: 1000,    period: 'dia',   label: 'KV · exclusões' },
   kvLists:        { limit: 1000,    period: 'dia',   label: 'KV · listagens' },
   kvStorage:      { limit: 1 * GB,  period: 'total', label: 'KV · armazenamento', bytes: true },
-  workerRequests: { limit: 100000,  period: 'dia',   label: 'Workers · requisições' },
+  workerRequests: { limit: 100000,  period: 'dia',   label: 'Workers + Pages · requisições' },
   d1RowsRead:     { limit: 5000000, period: 'dia',   label: 'D1 · linhas lidas' },
   d1RowsWritten:  { limit: 100000,  period: 'dia',   label: 'D1 · linhas escritas' },
   d1Storage:      { limit: 5 * GB,  period: 'total', label: 'D1 · armazenamento', bytes: true },
@@ -115,6 +115,15 @@ const Q_DO = `query($accountTag:String!,$since:Time!,$until:Time!){viewer{accoun
   durableObjectsInvocationsAdaptiveGroups(limit:100,filter:{datetime_geq:$since,datetime_leq:$until}){sum{requests}dimensions{scriptName}}
 }}}`;
 
+// Pages Functions (este painel: /api/*) moram num dataset À PARTE do de
+// Workers — verificado em produção: workersInvocationsAdaptive só trazia o
+// `fotos`. Mas o teto de 100 mil requisições/dia do plano gratuito é de
+// Workers E Pages Functions somados; sem esta consulta a cota
+// "Workers · requisições" subcontava justamente o painel.
+const Q_PAGES = `query($accountTag:String!,$since:Time!,$until:Time!){viewer{accounts(filter:{accountTag:$accountTag}){
+  pagesFunctionsInvocationsAdaptiveGroups(limit:100,filter:{datetime_geq:$since,datetime_leq:$until}){sum{requests errors}dimensions{scriptName}}
+}}}`;
+
 // Worker detalhado hora a hora (o que mais importa acompanhar).
 export const WORKER_DETALHADO = 'fotos';
 
@@ -142,7 +151,7 @@ async function collectUsage(token, accountTag) {
 
   const agora = new Date();
   const ontem = new Date(agora.getTime() - 24 * 3600_000);
-  const [kvOps, kvStore, workers, d1, hora, dobj] = await Promise.all([
+  const [kvOps, kvStore, workers, d1, hora, dobj, pages] = await Promise.all([
     gql(token, accountTag, Q_KV_OPS, { since: w.since, until: w.until }).catch(e => { errors.push(`KV ops: ${e.message}`); return null; }),
     gql(token, accountTag, Q_KV_STORAGE, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(`KV storage: ${e.message}`); return null; }),
     gql(token, accountTag, Q_WORKERS, { since: w.since, until: w.until }).catch(e => { errors.push(`Workers: ${e.message}`); return null; }),
@@ -150,6 +159,7 @@ async function collectUsage(token, accountTag) {
     gql(token, accountTag, Q_WORKER_HORA, { since: ontem.toISOString(), until: agora.toISOString(), script: WORKER_DETALHADO })
       .catch(e => { errors.push(`${WORKER_DETALHADO} por hora: ${e.message}`); return null; }),
     gql(token, accountTag, Q_DO, { since: w.since, until: w.until }).catch(e => { errors.push(`Durable Objects: ${e.message}`); return null; }),
+    gql(token, accountTag, Q_PAGES, { since: w.since, until: w.until }).catch(e => { errors.push(`Pages Functions: ${e.message}`); return null; }),
   ]);
 
   if (kvOps) {
@@ -190,6 +200,21 @@ async function collectUsage(token, accountTag) {
         };
       })
       .sort((a, b) => b.requests - a.requests);
+  }
+  if (pages) {
+    const rows = pages.pagesFunctionsInvocationsAdaptiveGroups || [];
+    const req = sumOf(rows, 'requests');
+    const err = sumOf(rows, 'errors');
+    usage.pagesRequests = req;
+    // Entra na mesma cota: o teto é da conta, Workers e Pages somados.
+    if (typeof usage.workerRequests === 'number' && typeof req === 'number') usage.workerRequests += req;
+    if (usage.porWorker && req) {
+      usage.porWorker.push({
+        script: 'Pages Functions', requests: req, errors: err,
+        errosPct: req ? Math.round((err / req) * 10000) / 100 : null, cpuP50Ms: null, cpuP99Ms: null,
+      });
+      usage.porWorker.sort((a, b) => b.requests - a.requests);
+    }
   }
   if (hora) {
     usage.workerPorHora = {
