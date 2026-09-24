@@ -1,21 +1,31 @@
 name: monitor
 
-# Keeps the status sweep — and with it server-side change detection + alert
-# emails — alive even when nobody has the dashboard open. /api/status only runs
-# when index.html polls it (on load + every 60s), so without any viewers no
-# sweep happens and no alert is sent. This pings it on a schedule instead.
+# O vigia do agendador — e o agendador de reserva.
 #
-# Caveats: scheduled workflows run only from the default branch, and GitHub can
-# delay them a few minutes under load. The 1h-per-service alert cooldown in
-# functions/api/status.js means a delayed or extra run never produces duplicate
-# emails.
+# Quem varre é o agendador da Cloudflare (agendador/, Cron Trigger a cada
+# 10 min). Este workflow mora fora da Cloudflare de propósito: é o único
+# observador que sobrevive a um problema na conta. Ele lê a idade do retrato
+# (/api/retrato, que não varre nada) e:
+#   • com o agendador em dia, não faz mais nada;
+#   • com o agendador parado há mais de 30 min, pede uma varredura de socorro
+#     e FALHA — o GitHub manda e-mail ao dono quando um workflow agendado
+#     falha, e esse é o alarme do alarme;
+#   • sem o agendador implantado (ou sem STATUS_DB), é ele o agendador, como
+#     sempre foi.
+# A lógica está em scripts/vigia.mjs, com teste em tests/vigia.test.mjs.
+#
+# O cron do GitHub NÃO é pontual: em setembro de 2026, agendado a cada 10 min,
+# rodou 5 a 8 vezes por dia (#38). Como vigia isso basta; como agendador,
+# nunca bastou. Minutos fora da virada da hora, que é quando a fila do GitHub
+# está mais cheia.
 on:
   schedule:
-    - cron: '*/10 * * * *'  # every 10 min — keeps KV writes low (account-wide
-                            #  free limit is 1k/day, shared with the fotos site)
-  workflow_dispatch: {}     # manual sweep button in the Actions tab
+    - cron: '4-59/10 * * * *'
+  workflow_dispatch: {}     # botão manual na aba Actions
 
-permissions: {}
+# `actions: write` só para o keep-alive abaixo.
+permissions:
+  actions: write
 
 concurrency:
   group: monitor
@@ -24,20 +34,29 @@ concurrency:
 jobs:
   sweep:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Trigger /api/status (fresh sweep -> detectAndNotify)
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
+      - name: Vigiar o agendador (e varrer se ele não estiver varrendo)
+        run: node scripts/vigia.mjs
+
+      # Keep-alive: em repositório público, o GitHub desliga o `schedule`
+      # depois de 60 dias sem atividade, sem avisar. Reabilitar o próprio
+      # workflow pela API a cada execução é o que as ações de keep-alive
+      # conhecidas fazem sem criar commit (um commit aqui seria um deploy do
+      # Pages). Best-effort: a garantia de verdade é o agendador da Cloudflare,
+      # que não tem esse limite.
+      - name: Keep-alive do schedule
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          set -u
-          # Cache-buster: /api/status is edge-cached 30s; a unique query key
-          # forces a fresh sweep so change detection runs on every tick.
-          url="https://status.lucafchala.com/api/status?source=gha-cron&t=${GITHUB_RUN_ID}-$(date +%s)"
-          for attempt in 1 2 3; do
-            if code=$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 30 "$url"); then
-              echo "sweep ok (HTTP $code)"
-              exit 0
-            fi
-            echo "attempt $attempt failed; retrying in 10s"
-            sleep 10
-          done
-          echo "status sweep failed after 3 attempts"
-          exit 1
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$REPO/actions/workflows/monitor.yml/enable")
+          echo "enable: HTTP $code"
