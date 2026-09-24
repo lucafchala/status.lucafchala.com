@@ -117,28 +117,12 @@ function page({ state, email = '', token = '' }, status = 200) {
   <meta name="theme-color" content="#0d0c0a"/>
   <meta name="robots" content="noindex,nofollow"/>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;1,400&family=JetBrains+Mono:wght@400&display=swap"/>
-  <style>
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    :root{--bg:#0d0c0a;--text:#e6e1d6;--muted:#6a6358;--accent:#c08030}
-    body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace;
-         min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px}
-    .wrap{max-width:480px;width:100%;text-align:center}
-    h1{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:clamp(32px,8vw,52px);line-height:0.92}
-    h1 em{font-style:italic;color:var(--accent)}
-    .msg{font-size:12px;color:var(--muted);margin-top:20px}
-    form{margin-top:28px}
-    button{font-family:inherit;font-size:12px;letter-spacing:.08em;text-transform:uppercase;
-           background:transparent;color:var(--accent);border:1px solid var(--accent);
-           padding:10px 20px;border-radius:2px;cursor:pointer}
-    button:hover{background:var(--accent);color:var(--bg)}
-    a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-  </style></head>
+  <link rel="stylesheet" href="/cancelar.css"/>
+  </head>
   <body><div class="wrap">
     <h1>${heading}</h1>
     ${body}
-    <p style="margin-top:40px;font-size:11px;color:var(--muted)">
+    <p class="voltar">
       <a href="https://status.lucafchala.com">← voltar ao status</a>
     </p>
   </div></body></html>`, {
@@ -150,11 +134,13 @@ function page({ state, email = '', token = '' }, status = 200) {
       // assets estáticos, e uma resposta de Function não pode depender dele
       // para ter política. Esta página renderiza um endereço de e-mail vindo
       // do armazenamento e não executa script nenhum — então `script-src
-      // 'none'` é literalmente o que ela precisa.
+      // 'none'` é literalmente o que ela precisa. Estilo e fontes da própria
+      // origem (/cancelar.css, /fonts/): nada de inline, nada de terceiro —
+      // a mesma política estrita do _headers, que o Pages também aplica aqui.
       'Content-Security-Policy': [
         "default-src 'none'",
-        "style-src 'unsafe-inline' https://fonts.googleapis.com",
-        "font-src https://fonts.gstatic.com",
+        "style-src 'self'",
+        "font-src 'self'",
         "img-src 'self'",
         "form-action 'self'",
         "base-uri 'none'",
