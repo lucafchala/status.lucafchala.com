@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; media-src 'none'; worker-src 'self'; manifest-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; media-src 'none'; worker-src 'none'; manifest-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests
   Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
@@ -13,3 +13,8 @@
 # Agent/crawler discovery hints on the homepage (RFC 8288).
 /
   Link: <https://status.lucafchala.com/>; rel="canonical", </sitemap.xml>; rel="sitemap"
+
+# Fontes com o hash do conteúdo no nome (app.css): arquivo novo, nome novo —
+# então podem ficar em cache para sempre.
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable

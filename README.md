@@ -32,7 +32,8 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
                   & provider status APIs                              notify_sent:{name}
 ```
 
-- **Static front end:** `index.html` (inline HTML/CSS/JS) renders the dashboard and persists `theme` in `localStorage`.
+- **Static front end:** `index.html` (markup only) + `app.css` + `app.js` + `tema.js` (the theme, applied synchronously in `<head>` so the page doesn't flash) render the dashboard and persist `theme` in `localStorage`. **No inline script, no inline style, no `on…` attribute, no third-party resource** — clicks go through one delegated listener keyed by `data-action` — so the CSP in `_headers` is `script-src 'self'; style-src 'self'; font-src 'self'` with no `'unsafe-inline'`. `tests/pagina.test.mjs` pins the files to that; a real browser is the actual check (an inline handler brought back shows up as "Refused to execute inline event handler" and a dead button).
+- **Fonts from our own origin:** Cormorant Garamond and JetBrains Mono as variable WOFF2 (Latin subset, ~117 KB for all three files) in `fonts/`, with a content hash in the file name, served `immutable`, the two faces used above the fold preloaded, `font-display: swap`. Google Fonts is gone from the page and the CSP — every visit used to hand the visitor's IP to Google, which fotos already stopped doing for the same reason (LGPD). Licenses (OFL) sit next to the files.
 - **Serverless back end:** Pages Functions under `functions/api/` (routes derive from file paths). `/api/status` is edge-cached for 30 s (`s-maxage`), so concurrent viewers share one upstream sweep per colo; `/api/painel` for 60 s and `/api/third-party-status` for 2 min, both under a **fixed** cache key so a random query string can't bust the cache and fan out requests to the providers.
 - **Polling cost:** the page used to call five endpoints every 60 s whether or not anyone was looking — one forgotten tab was ~7,200 Pages Function invocations and ~24k requests on the fotos Worker a day. Now: two calls, timed to the scheduler (≤ 144 refreshes/day for a tab that stays visible), zero while hidden, exponential backoff (2 → 4 → … → 30 min) when the server doesn't answer. A failed refresh keeps the last known state on screen and says it's stale, instead of painting every service "offline".
 - **Shared snapshot (D1, optional):** with the `STATUS_DB` binding, every sweep is written to D1 (`functions/api/retrato.js`) and **visitors read the last snapshot instead of sweeping** — a sweep costs ~38 subrequests and 17 requests on the fotos Worker, so without this the monitor's cost grew with its audience. Only a request that says who it is (`?source=cloudflare-cron`, `?source=gha-cron`, `?varrer`) sweeps, and only through a **global lock in D1** (an atomic conditional `UPDATE`): at most one sweep every 4 min for the whole account, however many requests arrive — no shared secret needed. If the snapshot is older than 20 min (scheduler late or dead), the next visitor's request can sweep once, through the same lock, so the page corrects itself without the cost scaling with visitors. The same rows feed the 48 h latency series (one sample per sweep, zero KV writes), 24 h/48 h uptime, and a per‑service **daily aggregate for 90‑day history bars**. The schema creates itself on first use; the owner only creates the database and binds it. **Without `STATUS_DB` nothing changes:** visitors sweep as before (30 s edge cache + per‑isolate floor), latency stays in KV, and history bars are rebuilt at zero cost from the 48 h transition log (48 hourly bars). A D1 error falls back to that same path — never a 500.
@@ -156,7 +157,10 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
 
 ```
 .
-├── index.html                       # Static dashboard: polls /api/status + /api/painel, renders status + latency, theme toggle
+├── index.html                       # Static dashboard markup (no inline script/style — strict CSP)
+├── app.js / app.css / tema.js       # The dashboard's script, styles, and the pre-paint theme
+├── cancelar.css                     # Styles of the unsubscribe page (a Function; same strict CSP)
+├── fonts/                           # Self-hosted variable WOFF2 (content-hashed names) + OFL licenses
 ├── agendador/                       # The scheduler: a Worker with only a Cron Trigger (*/10) that requests a sweep
 │   ├── index.js                     #   entry — exports only the handler (workerd rejects any other export)
 │   ├── varrer.js                    #   the request, with pages.dev fallback
@@ -183,6 +187,7 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
     ├── agendador.test.mjs           # scheduler + watchdog: every branch of "is the alarm alive?"
     ├── contrato.test.mjs            # what status.js reads from fotos' healthz vs. the contract fotos publishes
     ├── custo.test.mjs               # what one sweep costs, counted request by request
+    ├── pagina.test.mjs              # the static page and the unsubscribe page vs. the strict CSP
     └── d1.mjs                       # D1 over real SQLite (node:sqlite) for the tests
 ```
 
@@ -190,7 +195,7 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
 
 ## Design
 
-Uses the shared ecosystem design system — dark `#0d0c0a` / amber `#c08030`, **Cormorant Garamond** + **JetBrains Mono**, light/dark toggle — **extended** with status‑state colors: `--up #4a8c5c`, `--degraded #8c6a20`, `--down #8c3a3a` (dark variant; lighter equivalents under the light theme). Status labels are Portuguese: **online** / **lento** / **offline**. The alert emails reuse the same tokens inline.
+Uses the shared ecosystem design system — dark `#0d0c0a` / amber `#c08030`, **Cormorant Garamond** + **JetBrains Mono** (self-hosted, see above), light/dark toggle — **extended** with status‑state colors: `--up #4a8c5c`, `--degraded #8c6a20`, `--down #8c3a3a` (dark variant; lighter equivalents under the light theme). Status labels are Portuguese: **online** / **lento** / **offline**. The alert emails reuse the same tokens inline.
 
 ➡️ **Canonical tokens, fonts, and components:** [lucafchala.com → Design System](https://github.com/lucafchala/lucafchala.com#design-system).
 
