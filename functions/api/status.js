@@ -51,8 +51,17 @@ function severityOf(from, to) {
 const SEVERITY_RANK = { info: 0, recuperado: 1, atencao: 2, critico: 3 };
 const SEVERITY_LABEL = { critico: 'CRÍTICO', atencao: 'ATENÇÃO', recuperado: 'RECUPERADO', info: 'INFO' };
 
-function fetchSvc(url, opts = {}) {
-  return fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS), ...opts });
+// Uma tentativa a mais quando a rede falha (timeout, conexão recusada, DNS): um
+// soluço de um instante não pode virar "fora do ar" num e-mail para todo mundo.
+// Só custa subrequest quando a primeira falha; resposta HTTP, qualquer que seja
+// o código, é resposta e não é repetida.
+const RETRY_TIMEOUT_MS = 5000;
+async function fetchSvc(url, opts = {}) {
+  try {
+    return await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS), ...opts });
+  } catch {
+    return fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(RETRY_TIMEOUT_MS), ...opts });
+  }
 }
 
 function netDetail(e) {
@@ -265,10 +274,12 @@ function fetchHealthz(url) {
 // Não há tempo de hash: o fotos tirou o `hashMs` do payload porque o Workers
 // congela o relógio durante execução síncrona e o número era sempre 0.
 export function healthInfra(label, h) {
+  h = h || {};
   if (h.rateLimited) return { label, status: 'degraded', detail: 'HTTP 429 (o healthz não tem rate limit: bloqueio na frente do Worker?)' };
   if (h.netError)    return { label, status: 'down', detail: h.netError };
   if (h.parseError)  return { label, status: 'down', detail: 'healthz sem JSON' };
   const j = h.json;
+  if (!j || typeof j !== 'object')      return { label, status: 'down', detail: 'healthz sem JSON' };
   if (j.kv === false || j.ok === false) return { label, status: 'down', detail: 'KV indisponível' };
   if (h.status >= 500)                  return { label, status: 'down', detail: `HTTP ${h.status}` };
 
@@ -301,6 +312,7 @@ export function healthInfra(label, h) {
 // backends (Turnstile/Resend/ADMIN_EMAIL) that are unset. This is what flags
 // "something we changed went wrong" rather than just a hard 500.
 export function healthSelftest(label, h) {
+  h = h || {};
   // If healthz is unreachable/unparseable/blocked, the infra row already owns
   // that outage — don't double-count it here.
   if (h.rateLimited || h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
@@ -345,6 +357,7 @@ function quando(iso) {
 }
 
 export function healthConfig(label, h) {
+  h = h || {};
   if (h.rateLimited || h.netError || h.parseError || !h.json) return { label, status: 'up', detail: '—' };
   const j = h.json;
   // Contrato que este painel não conhece: um campo pode ter mudado de
@@ -614,6 +627,9 @@ export function dominioOuWorker(label, primary, h) {
 export const SERVICES = [
   {
     name: 'lucafchala.com', url: 'https://lucafchala.com', marker: 'Luca',
+    // O `_redirects` do site é gerado pelo dash e responde antes dos arquivos:
+    // um splat que pegasse tudo transformaria cada link quebrado em 200.
+    checks: (b) => [checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404)],
   },
   {
     name: 'Rádio', url: 'https://radio.lucafchala.com', marker: 'Radio',
@@ -722,8 +738,11 @@ export const SERVICES = [
   },
   {
     name: 'URL', url: 'https://url.lucafchala.com', marker: 'url.lucafchala.com',
-    checks: (b) => checkDados('data.json (redirects)', 'atualidade dos dados', b + '/data.json',
-      (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' }), { collection: 'redirects' }),
+    checks: (b) => [
+      ...checkDados('data.json (redirects)', 'atualidade dos dados', b + '/data.json',
+        (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' }), { collection: 'redirects' }),
+      checkStatusCode('roteamento (404)', b + '/__status_probe_404__', 404),
+    ],
   },
   {
     name: 'Keys', url: 'https://keys.lucafchala.com', marker: 'Chaves',
@@ -759,20 +778,11 @@ export const SERVICES = [
     // run; the GitHub Actions monitor's non-200 is the backstop for that.)
     name: 'Status', url: 'https://status.lucafchala.com', marker: 'monitoramento de serviços',
     checks: (b, env) => [
-      checkJson('saúde · KV/Resend/notify', b + '/api/healthz', (j) => {
-        if (!j) return { detail: 'healthz inválido' };
-        const probs = [];
-        if (j.kv === false)        probs.push('STATUS_KV ausente (alertas/inscrições off)');
-        if (j.resendKey === false) probs.push('RESEND_API_KEY ausente (sem e-mail)');
-        if (j.notifyTo === false)  probs.push('NOTIFY_TO ausente (sem destinatário)');
-        if (probs.length) return { detail: probs.join(' · ') };
-        // Healthy: report the reach of an alert. Zero subscribers is a valid
-        // state (NOTIFY_TO still gets everything), so it's shown, not flagged.
-        const bits = [];
-        if (typeof j.subscribers === 'number') bits.push(`${j.subscribers} inscrito${j.subscribers === 1 ? '' : 's'}`);
-        if (j.cloudflareApi === false) bits.push('cotas não monitoradas');
-        return bits.length ? { status: 'up', detail: bits.join(' · ') } : null;
-      }),
+      checkJson('saúde', b + '/api/healthz', (j) => (j && j.ok === true ? null : { detail: 'healthz inválido' })),
+      // A configuração é lida do próprio ambiente (é o mesmo projeto): o
+      // healthz público não diz mais quais segredos faltam nem quantos são os
+      // inscritos, e este detalhe vai para a /api/status, que é pública.
+      Promise.resolve(configAlertas('configuração de alertas', env)),
       // Config presence (above) only proves the key *exists*; this proves it is
       // still accepted and the sender domain is still verified.
       checkResend('entrega de alertas (Resend)', env),
@@ -780,9 +790,25 @@ export const SERVICES = [
   },
 ];
 
+function configAlertas(label, env) {
+  const faltam = !env?.STATUS_KV || !env?.RESEND_API_KEY || !env?.NOTIFY_TO;
+  if (faltam) return { label, status: 'degraded', detail: 'configuração incompleta (alertas ou inscrições afetados)' };
+  return { label, status: 'up', detail: env.CF_API_TOKEN && env.CF_ACCOUNT_ID ? '' : 'cotas não monitoradas' };
+}
+
+// Uma verificação que lança (um payload inesperado, um bug) vira uma linha
+// "instável" com nome, em vez de derrubar a varredura inteira num 500.
+const ERRO_INTERNO = { status: 'degraded', detail: 'erro interno na verificação' };
+function isolar(p, label = 'verificação') {
+  return Promise.resolve(p).catch((e) => { console.error('check lançou', label, e); return { label, ...ERRO_INTERNO }; });
+}
+
 async function checkService(svc, env, anterior) {
   const primary = await probePrimary(svc.url, svc.marker, svc.degradedMs);
-  const extra = svc.checks ? await Promise.all(svc.checks(svc.url, env, primary, anterior)) : [];
+  let lista = [];
+  try { lista = svc.checks ? svc.checks(svc.url, env, primary, anterior) : []; }
+  catch (e) { console.error('checks lançou', svc.name, e); lista = [Promise.resolve({ label: 'verificações', ...ERRO_INTERNO })]; }
+  const extra = await Promise.all(lista.map((p) => isolar(p)));
 
   const checks = [{ label: 'disponibilidade', status: primary.status, detail: primary.detail }, ...extra];
   let status = primary.status;
@@ -834,7 +860,10 @@ let _lastSweep = null;
 // resultado enquanto a versão implantada não muda.
 export async function varrer(env, anterior = null) {
   const antes = (nome) => (anterior && Array.isArray(anterior.services) ? anterior.services.find((x) => x && x.name === nome) : null) || null;
-  const services = await Promise.all(SERVICES.map((s) => checkService(s, env, antes(s.name))));
+  const services = await Promise.all(SERVICES.map((s) => checkService(s, env, antes(s.name)).catch((e) => {
+    console.error('serviço lançou', s.name, e);
+    return { name: s.name, url: s.url, status: 'degraded', statusCode: null, rt: 0, checks: [{ label: 'disponibilidade', ...ERRO_INTERNO }], problems: [`disponibilidade: ${ERRO_INTERNO.detail}`] };
+  })));
   return { services, checkedAt: new Date().toISOString() };
 }
 
@@ -850,11 +879,16 @@ export function origemDoPedido(url) {
   return null;
 }
 
+// O payload é público de propósito: o painel (dash) e a home leem os pontos de
+// status direto do navegador.
+const CORS = { 'Access-Control-Allow-Origin': '*' };
+
 function responder(payload, extra = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': extra.cacheControl || 'no-store',
+    ...CORS,
   };
   if (extra.idadeMs != null) headers['X-Sweep-Age-Ms'] = String(Math.max(0, extra.idadeMs));
   if (extra.origem) headers['X-Sweep-Source'] = extra.origem;
@@ -934,6 +968,7 @@ async function semRetrato(context) {
         // painel que mostra "agora" sobre um dado de 15 s atrás mente pouco,
         // mas mente — e depurar isso sem o cabeçalho é adivinhação.
         'X-Sweep-Age-Ms': String(agora - _lastSweepAt),
+        ...CORS,
       },
     });
   }
@@ -953,6 +988,7 @@ async function semRetrato(context) {
       // vigia registram quem varreu e quão velho é o que receberam.
       'X-Sweep-Age-Ms': '0',
       'X-Sweep-Source': origemDoPedido(new URL(context.request.url)) || 'visitante',
+      ...CORS,
     },
   });
   context.waitUntil(cache.put(cacheKey, res.clone()));
@@ -982,7 +1018,7 @@ const NOTIFY_COOLDOWN_S = 3600; // at most one alert per service per hour
 // Vale só para este isolate, como todo estado de módulo. Se a Cloudflare rodar
 // a varredura em outro, ele pode mandar mais um e-mail — o que é o lado certo
 // de errar: repetir um aviso é barato, engolir o único aviso não é.
-const _fallback = { lastStatus: null, notifiedAt: new Map() };
+const _fallback = { lastStatus: null, notifiedAt: new Map(), pending: null };
 
 // Free-tier headroom joins change detection, so a limit that starts running out
 // reaches the inbox instead of waiting to be spotted on the dashboard. Fetched
@@ -1001,9 +1037,10 @@ const _fallback = { lastStatus: null, notifiedAt: new Map() };
 async function quotaEntries(origin) {
   try {
     const res = await fetchSvc(origin + '/api/quota-stats', { headers: { Accept: 'application/json' } });
-    if (!res.ok) { res.body?.cancel(); return []; }
+    if (!res.ok) { res.body?.cancel(); return null; }
     const j = await res.json();
-    if (!j || j.configured === false) return [];
+    if (!j || typeof j !== 'object') return null;
+    if (j.configured === false) return [];
 
     const entries = [];
     for (const q of j.quotas || []) {
@@ -1015,6 +1052,7 @@ async function quotaEntries(origin) {
         status: q.status,
         url: origin,
         quiesceOnRecovery: true,
+        ownerOnly: true,
         problems: q.status === 'up' ? [] : [
           `${q.label}: ${q.pct}% usado${q.remaining != null ? ` · restam ${q.remaining.toLocaleString('pt-BR')}` : ''}${q.period === 'dia' ? ' hoje (zera à meia-noite UTC)' : ''}`,
         ],
@@ -1027,6 +1065,7 @@ async function quotaEntries(origin) {
         status: c.status,
         url: origin,
         quiesceOnRecovery: true,
+        ownerOnly: true,
         problems: c.status === 'up' ? [] : [`certificado de ${c.zone}: ${c.detail}`],
       });
     }
@@ -1034,29 +1073,37 @@ async function quotaEntries(origin) {
   } catch {
     // Quota visibility failing must never take the service sweep's alerting
     // down with it.
-    return [];
+    return null;
   }
 }
+
+// Linhas de cota/TLS falam da conta Cloudflare do dono, não de um serviço que
+// o visitante usa: vão só para o NOTIFY_TO.
+const OWNER_ONLY_PREFIXES = ['cota · ', 'TLS · '];
+function isOwnerOnlyName(name) { return OWNER_ONLY_PREFIXES.some((p) => name.startsWith(p)); }
 
 export async function detectAndNotify(env, services, origin, { latenciaNoD1 = false } = {}) {
   const KV = env.STATUS_KV;
   if (!KV) return;
 
+  const quotas = await quotaEntries(origin);
+
+  let prev = {};
+  let prevOk = true;
+  try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; prevOk = false; }
+  // Só existe depois de uma gravação recusada, e nesse caso o KV está velho de
+  // propósito: quem sabe o estado mais recente é o espelho.
+  if (_fallback.lastStatus) { prev = { ...prev, ..._fallback.lastStatus }; prevOk = true; }
+
   // Services and quota rows run through one pipeline from here: same change
-  // detection, same severity, same per-name cooldown, same batched e-mail.
+  // detection, same severity, same cooldown, same batched e-mail.
   const tracked = [
     ...services.map((s) => ({
       name: s.name, status: s.status, url: s.url,
       problems: s.problems, quiesceOnRecovery: false,
     })),
-    ...(await quotaEntries(origin)),
+    ...(quotas || []),
   ];
-
-  let prev = {};
-  try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; }
-  // Só existe depois de uma gravação recusada, e nesse caso o KV está velho de
-  // propósito: quem sabe o estado mais recente é o espelho.
-  if (_fallback.lastStatus) prev = { ...prev, ..._fallback.lastStatus };
 
   // Write last_status ONLY when something actually changed. KV writes are the
   // tightest free-tier limit (1k/day, shared account-wide with the fotos site),
@@ -1065,31 +1112,42 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
   // cron's nominal 10 min, far more with the dashboard open) on a value that
   // rarely changes. Now: ~0 in steady state, a write only on a real transition.
   const next = {};
-  let changed = false;
-  for (const s of tracked) {
-    next[s.name] = s.status;
-    if (prev[s.name] !== s.status) changed = true;
+  for (const s of tracked) next[s.name] = s.status;
+  // quota-stats fora do ar não é "todas as cotas sumiram": as linhas anteriores
+  // seguem como estavam, senão a volta dela contaria como primeira aparição.
+  if (quotas === null) {
+    for (const [k, v] of Object.entries(prev)) if (isOwnerOnlyName(k) && !(k in next)) next[k] = v;
   }
+  let changed = false;
+  for (const k of Object.keys(next)) { if (prev[k] !== next[k]) { changed = true; break; } }
   if (!changed) {
     for (const k of Object.keys(prev)) { if (!(k in next)) { changed = true; break; } } // a service was removed
   }
+
+  // Um serviço que aparece pela primeira vez já quebrado conta como saída do
+  // verde: antes ele entrava calado em last_status e o alerta nunca vinha.
+  // Só quando há um last_status lido e não vazio — a primeira varredura de uma
+  // instalação nova (ou um KV ilegível) não pode virar uma rajada de e-mails.
+  const knowsHistory = prevOk && Object.keys(prev).length > 0;
+  const fromOf = (s) => prev[s.name] || (knowsHistory ? 'up' : null);
+
   // Every real transition, logged. This is what lets a green dashboard still
   // answer "was it already broken an hour ago?" — and it rides along inside the
   // `changed` block precisely so it costs nothing in steady state. Transitions
   // are recorded even when e-mail is unconfigured: the log is a record of what
   // happened, not a side effect of alerting.
   const transitions = tracked
-    .filter((s) => prev[s.name] && prev[s.name] !== s.status)
+    .filter((s) => { const f = fromOf(s); return f && f !== s.status; })
     // A quota falling back to `up` is the UTC-midnight reset, not a recovery.
     // Its new state is still recorded below, so the next crossing alerts again —
     // it just doesn't announce the clock.
     .filter((s) => !(s.quiesceOnRecovery && s.status === 'up'))
     .map((s) => ({
       name: s.name,
-      from: prev[s.name],
+      from: fromOf(s),
       to: s.status,
       at: new Date().toISOString(),
-      severity: severityOf(prev[s.name], s.status),
+      severity: severityOf(fromOf(s), s.status),
       problems: Array.isArray(s.problems) ? s.problems.slice(0, 5) : [],
     }));
 
@@ -1138,37 +1196,92 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
   // alerting entirely (ALERT_MIN_SEVERITY=atencao mutes recovery notices;
   // =critico pages only for hard outages). Defaults to alerting on everything.
   const floor = SEVERITY_RANK[env.ALERT_MIN_SEVERITY] ?? SEVERITY_RANK.info;
-
-  const changes = [];
   const now = Date.now();
+  const current = Object.fromEntries(tracked.map((s) => [s.name, s]));
+
+  // Envio que falhou na varredura anterior. last_status já avançou, então sem
+  // esta fila a transição nunca mais seria detectada e o aviso se perderia.
+  // Só volta a tentar o que ainda é verdade agora.
+  const pending = (await readPending(KV))
+    .filter((c) => current[c.name] && current[c.name].status === c.to && !transitions.some((t) => t.name === c.name));
+
+  const candidates = [];
   for (const t of transitions) {
     if (SEVERITY_RANK[t.severity] < floor) continue;
-    const s = tracked.find((x) => x.name === t.name);
+    // O cooldown é por serviço E destino: repetir "caiu" dentro da hora é
+    // ruído, mas a recuperação (ou a piora de degradado para fora do ar) é
+    // notícia nova e sempre passa.
+    const key = cooldownKey(t.name, t.to);
     // KV is eventually consistent, so two colos sweeping at once can rarely
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
     let onCooldown = false;
-    try { onCooldown = !!(await KV.get(`notify_sent:${t.name}`)); } catch { onCooldown = false; }
+    try { onCooldown = !!(await KV.get(key)); } catch { onCooldown = false; }
     // Cooldown que não pôde ser GRAVADO não protege nada: sem este segundo
     // olhar, uma cota estourada faria a mesma transição render e-mail a cada
     // varredura (a cada disparo do cron, a cada poucos minutos com o painel aberto).
     if (!onCooldown) {
-      const last = _fallback.notifiedAt.get(t.name);
+      const last = _fallback.notifiedAt.get(key);
       if (last && now - last < NOTIFY_COOLDOWN_S * 1000) onCooldown = true;
     }
     if (onCooldown) continue;
-    try {
-      await KV.put(`notify_sent:${t.name}`, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
-    } catch (e) {
-      console.error('notify cooldown write failed (cota de KV?)', e);
-    }
-    // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto quando
-    // a gravação falhou.
-    _fallback.notifiedAt.set(t.name, now);
-    changes.push({ ...t, url: s ? s.url : '' });
+    const s = current[t.name];
+    candidates.push({ ...t, url: s ? s.url : '', ownerOnly: isOwnerOnlyName(t.name), attempts: 0 });
   }
+  const changes = [...candidates, ...pending];
   if (changes.length === 0) return;
 
-  await sendAlerts(env, changes).catch(e => console.error('status alert email failed', e));
+  let ok = false;
+  try { ok = await sendAlerts(env, changes); }
+  catch (e) { console.error('status alert email failed', e); ok = false; }
+
+  if (ok) {
+    for (const c of changes) {
+      const key = cooldownKey(c.name, c.to);
+      try {
+        await KV.put(key, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+      } catch (e) {
+        console.error('notify cooldown write failed (cota de KV?)', e);
+      }
+      // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto
+      // quando a gravação falhou.
+      _fallback.notifiedAt.set(key, now);
+    }
+    if (pending.length) await writePending(KV, []);
+    return;
+  }
+  // Falhou: o cooldown não foi gasto, e a transição fica na fila para a
+  // próxima varredura — no máximo MAX_ALERT_ATTEMPTS vezes, para um
+  // destinatário que o Resend recusa sempre não virar e-mail repetido ao dono.
+  const retry = changes
+    .map((c) => ({ ...c, attempts: (c.attempts || 0) + 1 }))
+    .filter((c) => c.attempts < MAX_ALERT_ATTEMPTS);
+  await writePending(KV, retry);
+}
+
+const MAX_ALERT_ATTEMPTS = 3;
+const PENDING_KEY = 'alert_pending';
+const PENDING_TTL_S = 6 * 3600;
+function cooldownKey(name, to) { return `notify_sent:${name}:${to}`; }
+
+async function readPending(KV) {
+  if (_fallback.pending) return _fallback.pending;
+  try {
+    const list = JSON.parse(await KV.get(PENDING_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((c) => c && typeof c.name === 'string' && typeof c.to === 'string') : [];
+  } catch { return []; }
+}
+
+// Só grava quando há falha a lembrar ou fila a limpar: em estado normal, zero
+// escrita. O espelho em memória cobre o KV que recusa escrita.
+async function writePending(KV, list) {
+  try {
+    if (list.length) await KV.put(PENDING_KEY, JSON.stringify(list), { expirationTtl: PENDING_TTL_S });
+    else await KV.delete(PENDING_KEY);
+    _fallback.pending = null;
+  } catch (e) {
+    _fallback.pending = list.length ? list : [];
+    console.error('alert_pending write failed', e);
+  }
 }
 
 async function sendAlerts(env, changes) {
@@ -1178,8 +1291,65 @@ async function sendAlerts(env, changes) {
   try { subscribers = JSON.parse(await KV.get('subscribers') || '[]') || []; } catch { subscribers = []; }
   if (!Array.isArray(subscribers)) subscribers = [];
 
-  const deduped = [...new Set([NOTIFY_TO, ...subscribers.map(s => s.email)])];
+  // Cota e TLS vão só para o dono; o resto, para todos. Um inscrito sem nada
+  // público nesta rodada não recebe e-mail.
+  const publicChanges = changes.filter((c) => !c.ownerOnly);
+  const subEmails = publicChanges.length ? subscribers.map((s) => s && s.email).filter(Boolean) : [];
+  const recipients = [...new Set([NOTIFY_TO, ...subEmails])];
+  const bySub = new Map(subscribers.filter((s) => s && s.email).map((s) => [s.email, s]));
 
+  const ownerMail = buildAlert(changes);
+  const publicMail = publicChanges.length ? buildAlert(publicChanges) : null;
+
+  const batch = recipients.map(email => {
+    const isOwner = email === NOTIFY_TO;
+    const mail = isOwner ? ownerMail : publicMail;
+    const sub = isOwner ? null : bySub.get(email);
+    const unsubUrl = sub
+      ? `https://status.lucafchala.com/api/unsubscribe?token=${encodeURIComponent(sub.token)}`
+      : null;
+    const msg = { from: NOTIFY_FROM, reply_to: NOTIFY_FROM, to: [email], subject: mail.subject, html: alertHtml(mail.rows, unsubUrl) };
+    // RFC 8058: o cliente de e-mail passa a mostrar o botão nativo de cancelar
+    // inscrição, e o POST de um clique cai no `onRequestPost` do
+    // /api/unsubscribe. Só para quem é inscrito — o NOTIFY_TO do dono não tem
+    // token e não deve poder se descadastrar dos próprios alertas por engano.
+    //
+    // O par de cabeçalhos vem junto ou não vem: `List-Unsubscribe` sozinho faz
+    // o cliente cair no modo antigo (abrir o link), que é justamente o GET que
+    // deixou de executar a ação.
+    if (unsubUrl) {
+      msg.headers = {
+        'List-Unsubscribe': `<${unsubUrl}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      };
+    }
+    return msg;
+  });
+
+  // O endpoint de lote do Resend aceita no máximo 100 mensagens por chamada;
+  // acima disso a chamada inteira era recusada — e ninguém sabia, porque a
+  // resposta não era lida. O dono vai no primeiro lote.
+  let ok = true;
+  for (let i = 0; i < batch.length; i += RESEND_BATCH_MAX) {
+    const res = await fetch('https://api.resend.com/emails/batch', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(batch.slice(i, i + RESEND_BATCH_MAX)),
+    });
+    if (!res.ok) {
+      ok = false;
+      const detail = await res.text().catch(() => '');
+      console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed: HTTP ${res.status}`, detail.slice(0, 300));
+    } else {
+      res.body?.cancel();
+    }
+  }
+  return ok;
+}
+
+const RESEND_BATCH_MAX = 100;
+
+function buildAlert(changes) {
   // Worst-first: when several services change at once the mail already batches
   // them into one message, so the ordering is what decides whether the outage
   // or the recovery is the first thing read.
@@ -1205,35 +1375,7 @@ async function sendAlerts(env, changes) {
   const subject = ordered.length === 1
     ? `[${SEVERITY_LABEL[top.severity]}] ${icon(top.to)} ${top.name} — status.lucafchala.com`
     : `[${SEVERITY_LABEL[top.severity]}] ${ordered.length} mudanças de status — status.lucafchala.com`;
-
-  const batch = deduped.map(email => {
-    const sub = subscribers.find(s => s.email === email);
-    const unsubUrl = sub
-      ? `https://status.lucafchala.com/api/unsubscribe?token=${sub.token}`
-      : null;
-    const msg = { from: NOTIFY_FROM, reply_to: NOTIFY_FROM, to: [email], subject, html: alertHtml(rows, unsubUrl) };
-    // RFC 8058: o cliente de e-mail passa a mostrar o botão nativo de cancelar
-    // inscrição, e o POST de um clique cai no `onRequestPost` do
-    // /api/unsubscribe. Só para quem é inscrito — o NOTIFY_TO do dono não tem
-    // token e não deve poder se descadastrar dos próprios alertas por engano.
-    //
-    // O par de cabeçalhos vem junto ou não vem: `List-Unsubscribe` sozinho faz
-    // o cliente cair no modo antigo (abrir o link), que é justamente o GET que
-    // deixou de executar a ação.
-    if (unsubUrl) {
-      msg.headers = {
-        'List-Unsubscribe': `<${unsubUrl}>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      };
-    }
-    return msg;
-  });
-
-  await fetch('https://api.resend.com/emails/batch', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(batch),
-  });
+  return { rows, subject };
 }
 
 function esc(s) {

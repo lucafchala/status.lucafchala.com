@@ -62,7 +62,7 @@
   --panel-2: #e6e0d5;
   --border: #d3cbbd;
   --text: #1c1a17;
-  --muted: #6e655a;
+  --muted: #6b6152;
   --accent: #8f5a14;
   --accent-forte: #7a4c10;
   --up: #23703d;
@@ -151,6 +151,8 @@ a:hover { color: var(--accent-forte); }
 .campo:focus-visible { border-color: var(--foco); }
 .inscricao-ok { font-size: 12px; color: var(--up); }
 .inscricao-erro { font-size: 12px; color: var(--down); }
+.inscricao-consent { font-size: 11px; }
+.inscricao-turnstile { flex-basis: 100%; min-height: 65px; }
 
 /* ── Conteúdo ─────────────────────────────────────────────────────────── */
 .wrap { max-width: 780px; margin: 0 auto; padding: 24px 16px 48px; }
@@ -176,6 +178,7 @@ a:hover { color: var(--accent-forte); }
 .faixa.estado-degraded .faixa-icone { background: var(--degraded); color: var(--bg); }
 .faixa.estado-down { background: var(--down-fundo); border-color: var(--down); }
 .faixa.estado-down .faixa-icone { background: var(--down); color: var(--bg); }
+.faixa.estado-unknown { border-style: dashed; }
 .faixa.estado-checking .faixa-icone { animation: pulso 1.2s ease-in-out infinite; }
 
 .idade-linha { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
@@ -214,6 +217,7 @@ a:hover { color: var(--accent-forte); }
 .estado.down { color: var(--down); }
 .estado.down .estado-ic { background: var(--down); color: var(--bg); }
 .estado.checking .estado-ic { animation: pulso 1.2s ease-in-out infinite; }
+.estado.unknown .estado-ic { background: var(--nd); color: var(--text); }
 
 .comp-nota { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .comp-nota:empty { display: none; }

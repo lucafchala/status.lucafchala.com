@@ -22,16 +22,207 @@ const SERVICES = [
   { name: 'Pays',                url: 'https://pays.lucafchala.com',            group: 'apps' },
   { name: 'Treino',              url: 'https://treino.lucafchala.com',          group: 'apps' },
 ];
-const GRUPOS = [['principal', 'Principais'], ['apps', 'Aplicativos']];
+const GRUPOS = ['principal', 'apps'];
 
 const THIRD_PARTY = [
   { name: 'GitHub',       page: 'https://www.githubstatus.com' },
   { name: 'Cloudflare',   page: 'https://www.cloudflarestatus.com' },
   { name: 'Claude',       page: 'https://status.anthropic.com' },
   { name: 'Resend',       page: 'https://status.resend.com' },
-  { name: 'Google Drive', page: 'https://workspace.google.com/status' },
-  { name: 'Google Fonts', page: 'https://status.cloud.google.com' },
+  { name: 'Google Drive', page: 'https://www.google.com/appsstatus/dashboard/' },
 ];
+
+// ── Idioma ──────────────────────────────────────────────────────────────
+// PT/EN da moldura da página. O que vem do servidor (nomes de serviço,
+// rótulos e detalhes das verificações, cotas) continua em português: é o
+// mesmo texto dos alertas e do histórico, e traduzir no cliente inventaria
+// uma segunda fonte da verdade. O `lang` é o cookie `lf_lang`, compartilhado
+// com todo o ecossistema (ver tema.js).
+const S = {
+  pt: {
+    g_principal: 'Principais', g_apps: 'Aplicativos',
+    st_up: 'operacional', st_degraded: 'degradado', st_down: 'fora do ar', st_unknown: 'sem dados', st_checking: 'verificando',
+    hist_loading: (n) => `histórico de ${n} ainda não carregado`,
+    checks_of: (n) => `verificações de ${n}`,
+    checked_at: (h) => `conferido às ${h}`,
+    ok: 'ok',
+    n_problems: (n) => `${n} problema${n > 1 ? 's' : ''}`,
+    n_checks_ok: (n) => `${n} verificaç${n > 1 ? 'ões' : 'ão'} ok`,
+    ago: (x) => `há ${x}`,
+    was: (st, quando, dur) => `esteve ${st} ${quando} · durou ${dur}`,
+    version: 'versão',
+    no_data_bar: 'sem dado',
+    available: (p) => `${p} disponível`,
+    n_down_sweeps: (n) => `${n} varredura${n > 1 ? 's' : ''} fora do ar`,
+    n_slow: (n) => `${n} degradada${n > 1 ? 's' : ''}`,
+    of_n: (n) => `de ${n}`,
+    hist_unavailable: 'histórico indisponível',
+    legend_daily: (n) => `${n} dias · 1 barra por dia`,
+    legend_hourly: (n) => `${n} h · 1 barra por hora (sem banco: reconstruído das transições)`,
+    hist_of_unavailable: (n) => `histórico de ${n} indisponível`,
+    bars_aria: (nome, n, diario, pct, down, deg, nd) => `${nome}, últimos ${n} ${diario ? 'dias' : 'h'}: ${pct == null ? 'sem dados' : fmtPct(pct) + ' disponível'}` +
+      `${down ? `; ${down} ${diario ? 'dias' : 'horas'} com queda` : ''}` +
+      `${deg ? `; ${deg} ${diario ? 'dias degradados' : 'horas degradadas'}` : ''}` +
+      `${nd ? `; ${nd} sem dado` : ''}`,
+    days_ago: (n) => `${n} dias atrás`, hours_ago: (n) => `${n} h atrás`,
+    today: 'hoje', now: 'agora', yesterday: 'ontem',
+    no_data_yet: 'sem dados ainda',
+    all_up: 'Todos os sistemas operacionais',
+    n_checked: (n) => `${n} serviços verificados`,
+    all_down: 'Interrupção generalizada',
+    all_down_sub: 'nenhum serviço respondeu como deveria',
+    n_bad: (n) => `${n} serviços com problema`,
+    no_answer: 'Sem resposta do servidor de status',
+    no_answer_sub: 'estado desconhecido — nova tentativa automática',
+    checked: 'verificado', just_now: 'agora há pouco', never_checked: 'ainda sem verificação',
+    server_silent: 'sem resposta do servidor', scheduler_late: 'agendador atrasado',
+    next_in: (x) => `próxima atualização em ${x}`, lt_1min: 'menos de 1 min',
+    paused: 'pausado (aba em segundo plano)',
+    unstable: (x) => `instável: ${x}`, n_changes: (n) => `${n} mudanças`,
+    no_incidents: 'Nenhum incidente nas últimas 48 h.',
+    ongoing: 'em andamento', since: 'desde', lasted: 'durou',
+    trend_title: 'mediana recente vs. anterior',
+    slowing: (x) => `ficando mais lento: ${x}`,
+    samples: (n, min) => `${n} amostras · ${min ? `1 a cada ${min} min` : '1 por varredura'} · linha tracejada = deploy`,
+    quotas_unread: 'cotas não lidas agora',
+    not_monitored: 'não monitorado', no_cf_token: 'sem token da API da Cloudflare',
+    unread: (x) => `não lido: ${x}`,
+    per_worker: 'Por Worker, hoje', th_script: 'script', th_req: 'requisições', th_err: 'erros',
+    hourly_title: (s) => `${s} · últimas 24 h, por hora`,
+    hourly_bar: (q, r, e, c) => `${q}: ${r} requisições · ${e} erros · CPU p99 ${c} ms`,
+    hourly_aria: (s, r, e, c) => `${s}, últimas 24 horas: ${r} requisições, ${e} com erro, CPU p99 máxima ${c} ms`,
+    hourly_sum: (r, e, c) => `${r} requisições · ${e} com erro · CPU p99 máx. ${c} ms`,
+    do_today: (r) => `Durable Objects hoje: ${r} requisições`,
+    refreshing: '↻ atualizando…', refresh: '↻ atualizar',
+    theme_light: 'claro', theme_dark: 'escuro', theme_aria: (x) => `mudar para o tema ${x}`,
+    lang_btn: 'EN', lang_aria: 'Switch to English',
+    sub_bad_email: 'Confira o endereço de e-mail.',
+    sub_error: 'Erro — tente novamente.',
+    sub_network: 'Falha de rede — tente novamente.',
+    sub_button: 'Inscrever',
+    sub_captcha: 'Complete a verificação anti-robô.',
+  },
+  en: {
+    g_principal: 'Main', g_apps: 'Apps',
+    st_up: 'operational', st_degraded: 'degraded', st_down: 'down', st_unknown: 'no data', st_checking: 'checking',
+    hist_loading: (n) => `${n} history not loaded yet`,
+    checks_of: (n) => `${n} checks`,
+    checked_at: (h) => `checked at ${h}`,
+    ok: 'ok',
+    n_problems: (n) => `${n} problem${n > 1 ? 's' : ''}`,
+    n_checks_ok: (n) => `${n} check${n > 1 ? 's' : ''} ok`,
+    ago: (x) => `${x} ago`,
+    was: (st, quando, dur) => `was ${st} ${quando} · lasted ${dur}`,
+    version: 'version',
+    no_data_bar: 'no data',
+    available: (p) => `${p} available`,
+    n_down_sweeps: (n) => `${n} sweep${n > 1 ? 's' : ''} down`,
+    n_slow: (n) => `${n} degraded`,
+    of_n: (n) => `of ${n}`,
+    hist_unavailable: 'history unavailable',
+    legend_daily: (n) => `${n} days · 1 bar per day`,
+    legend_hourly: (n) => `${n} h · 1 bar per hour (no database: rebuilt from transitions)`,
+    hist_of_unavailable: (n) => `${n} history unavailable`,
+    bars_aria: (nome, n, diario, pct, down, deg, nd) => `${nome}, last ${n} ${diario ? 'days' : 'h'}: ${pct == null ? 'no data' : fmtPct(pct) + ' available'}` +
+      `${down ? `; ${down} ${diario ? 'days' : 'hours'} with an outage` : ''}` +
+      `${deg ? `; ${deg} ${diario ? 'days' : 'hours'} degraded` : ''}` +
+      `${nd ? `; ${nd} without data` : ''}`,
+    days_ago: (n) => `${n} days ago`, hours_ago: (n) => `${n} h ago`,
+    today: 'today', now: 'now', yesterday: 'yesterday',
+    no_data_yet: 'no data yet',
+    all_up: 'All systems operational',
+    n_checked: (n) => `${n} services checked`,
+    all_down: 'Widespread outage',
+    all_down_sub: 'no service answered as expected',
+    n_bad: (n) => `${n} services with problems`,
+    no_answer: 'No answer from the status server',
+    no_answer_sub: 'state unknown — retrying automatically',
+    checked: 'checked', just_now: 'just now', never_checked: 'not checked yet',
+    server_silent: 'no answer from the server', scheduler_late: 'scheduler running late',
+    next_in: (x) => `next update in ${x}`, lt_1min: 'under 1 min',
+    paused: 'paused (tab in background)',
+    unstable: (x) => `flapping: ${x}`, n_changes: (n) => `${n} changes`,
+    no_incidents: 'No incidents in the last 48 h.',
+    ongoing: 'ongoing', since: 'since', lasted: 'lasted',
+    trend_title: 'recent median vs. previous',
+    slowing: (x) => `getting slower: ${x}`,
+    samples: (n, min) => `${n} samples · ${min ? `1 every ${min} min` : '1 per sweep'} · dashed line = deploy`,
+    quotas_unread: 'quotas not read right now',
+    not_monitored: 'not monitored', no_cf_token: 'no Cloudflare API token',
+    unread: (x) => `not read: ${x}`,
+    per_worker: 'Per Worker, today', th_script: 'script', th_req: 'requests', th_err: 'errors',
+    hourly_title: (s) => `${s} · last 24 h, hourly`,
+    hourly_bar: (q, r, e, c) => `${q}: ${r} requests · ${e} errors · CPU p99 ${c} ms`,
+    hourly_aria: (s, r, e, c) => `${s}, last 24 hours: ${r} requests, ${e} with errors, max CPU p99 ${c} ms`,
+    hourly_sum: (r, e, c) => `${r} requests · ${e} with errors · max CPU p99 ${c} ms`,
+    do_today: (r) => `Durable Objects today: ${r} requests`,
+    refreshing: '↻ refreshing…', refresh: '↻ refresh',
+    theme_light: 'light', theme_dark: 'dark', theme_aria: (x) => `switch to ${x} theme`,
+    lang_btn: 'PT', lang_aria: 'Mudar para português',
+    sub_bad_email: 'Check the e-mail address.',
+    sub_error: 'Error — please try again.',
+    sub_network: 'Network error — please try again.',
+    sub_button: 'Subscribe',
+    sub_captcha: 'Complete the anti-bot check.',
+  },
+};
+
+// Textos estáticos do HTML (data-i18n). O português está no próprio HTML e é
+// o que aparece sem JavaScript; aqui só o inglês.
+const HTML_EN = {
+  skip: 'Skip to services',
+  brand_aria: 'Status lucafchala.com — home',
+  nav_aria: 'Actions',
+  alerts_btn: 'Get alerts',
+  home: 'home',
+  sub_text: 'An e-mail when a service goes down, degrades or comes back. You can unsubscribe from the link in every message.',
+  sub_label: 'Your e-mail',
+  sub_ok: 'Subscribe',
+  cancel: 'Cancel',
+  sub_consent: 'We store only your address, to send these alerts. Nothing is saved until you confirm by e-mail; the link in each message removes it.',
+  sub_pending: '✓ Almost there: if this address is not subscribed yet, we sent a confirmation link. It is valid for 24 hours.',
+  h_services: 'Services',
+  h_incidents: 'Recent incidents',
+  h_latency: 'Response time',
+  latency_note: '48 h · median and p95',
+  h_third: 'Third-party services',
+  third_note: 'that the ecosystem depends on',
+  h_quotas: 'Cloudflare account quotas',
+  quotas_note: 'today, UTC window',
+  legend_aria: 'Bar legend',
+  lg_up: 'operational', lg_degraded: 'degraded', lg_down: 'down', lg_nd: 'no data',
+  loading: 'loading…',
+  checking_all: 'Checking services…',
+  history: 'history',
+};
+
+let lang = (window.lfPrefs && window.lfPrefs.lang) === 'en' ? 'en' : 'pt';
+const HTML_PT = {};
+
+function t(k, ...args) {
+  const v = S[lang][k] ?? S.pt[k];
+  return typeof v === 'function' ? v(...args) : v;
+}
+const locale = () => (lang === 'en' ? 'en-GB' : 'pt-BR');
+
+function aplicarIdiomaHtml() {
+  document.documentElement.lang = lang === 'en' ? 'en' : 'pt-BR';
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    const k = el.dataset.i18n;
+    if (!(k in HTML_PT)) HTML_PT[k] = el.textContent;
+    el.textContent = lang === 'en' ? (HTML_EN[k] ?? HTML_PT[k]) : HTML_PT[k];
+  });
+  document.querySelectorAll('[data-i18n-attr]').forEach((el) => {
+    el.dataset.i18nAttr.split(';').forEach((par) => {
+      const [attr, k] = par.split(':');
+      const chave = attr + ':' + k;
+      if (!(chave in HTML_PT)) HTML_PT[chave] = el.getAttribute(attr) || '';
+      el.setAttribute(attr, lang === 'en' ? (HTML_EN[k] ?? HTML_PT[chave]) : HTML_PT[chave]);
+    });
+  });
+  const b = document.getElementById('btn-lang');
+  if (b) { b.textContent = t('lang_btn'); b.setAttribute('aria-label', t('lang_aria')); b.setAttribute('lang', lang === 'en' ? 'pt-BR' : 'en'); }
+}
 
 // Cadência. O dado que a página mostra muda quando uma varredura roda, e o
 // agendador varre a cada 10 min. Pedir a cada 60 s — como era — pagava dez
@@ -63,6 +254,7 @@ let ultimoAnuncio = '';        // o que a região aria-live disse por último
 let resultados = [];           // última varredura aplicada
 let historicoAtual = null;     // último /api/painel → historico
 let barrasAtuais = null;       // último /api/painel → barras
+let ultimoPainel = null;       // último /api/painel inteiro (para redesenhar ao trocar o idioma)
 
 // ── Rede ────────────────────────────────────────────────────────────────
 // Resposta que não é 2xx, ou corpo que não é JSON, conta como falha — não
@@ -108,13 +300,16 @@ function agendar() {
 // ── Formatação ──────────────────────────────────────────────────────────
 // Estado nunca só por cor: cada um tem ícone e palavra.
 const ESTADOS = {
-  up:       { ic: '✓', txt: 'operacional' },
-  degraded: { ic: '!', txt: 'degradado' },
-  down:     { ic: '✕', txt: 'fora do ar' },
-  unknown:  { ic: '?', txt: 'sem dados' },
-  checking: { ic: '…', txt: 'verificando' },
+  up:       { ic: '✓' },
+  degraded: { ic: '!' },
+  down:     { ic: '✕' },
+  unknown:  { ic: '?' },
+  checking: { ic: '…' },
 };
-const estadoDe = (s) => ESTADOS[s] || ESTADOS.unknown;
+const estadoDe = (s) => {
+  const k = s in ESTADOS ? s : 'unknown';
+  return { ic: ESTADOS[k].ic, txt: t('st_' + k) };
+};
 function statusLabel(s) { return estadoDe(s).txt; }
 
 function esc(s) {
@@ -123,7 +318,7 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
-function fmtNum(n) { return n == null ? '—' : n.toLocaleString('pt-BR'); }
+function fmtNum(n) { return n == null ? '—' : n.toLocaleString(locale()); }
 
 function fmtBytes(n) {
   if (n == null) return '—';
@@ -150,20 +345,21 @@ function fmtDur(ms) {
 
 function fmtPct(p) {
   if (p == null || !Number.isFinite(p)) return '—';
-  return (p === 100 ? '100' : p.toFixed(p >= 99.95 ? 3 : 2)).replace('.', ',') + ' %';
+  const v = p === 100 ? '100' : p.toFixed(p >= 99.95 ? 3 : 2);
+  return (lang === 'en' ? v : v.replace('.', ',')) + ' %';
 }
 
 const FMT_HORA = { hour: '2-digit', minute: '2-digit' };
 const FMT_DIA = { day: '2-digit', month: 'short' };
-function hora(ms) { return new Date(ms).toLocaleTimeString('pt-BR', FMT_HORA); }
-function dia(ms) { return new Date(ms).toLocaleDateString('pt-BR', FMT_DIA).replace('.', ''); }
+function hora(ms) { return new Date(ms).toLocaleTimeString(locale(), FMT_HORA); }
+function dia(ms) { return new Date(ms).toLocaleDateString(locale(), FMT_DIA).replace('.', ''); }
 function timeTag(ms, texto) {
-  return `<time datetime="${new Date(ms).toISOString()}" title="${esc(new Date(ms).toLocaleString('pt-BR'))}">${esc(texto)}</time>`;
+  return `<time datetime="${new Date(ms).toISOString()}" title="${esc(new Date(ms).toLocaleString(locale()))}">${esc(texto)}</time>`;
 }
 
 function rtLabel(rt, status) {
   if (status === 'down' || rt == null) return '';
-  if (rt >= 1000) return (rt / 1000).toFixed(1).replace('.', ',') + ' s';
+  if (rt >= 1000) { const v = (rt / 1000).toFixed(1); return (lang === 'en' ? v : v.replace('.', ',')) + ' s'; }
   return rt + ' ms';
 }
 
@@ -177,9 +373,9 @@ function mostra(id, sim) { const el = document.getElementById(id); if (el) el.hi
 // ── Esqueleto ───────────────────────────────────────────────────────────
 function renderSkeletons() {
   const list = document.getElementById('services-list');
-  list.innerHTML = GRUPOS.map(([g, titulo]) => `
+  list.innerHTML = GRUPOS.map((g) => `
     <div class="grupo">
-      <h3 class="grupo-titulo">${esc(titulo)}</h3>
+      <h3 class="grupo-titulo">${esc(t('g_' + g))}</h3>
       <ul class="componentes">
         ${SERVICES.map((svc, i) => svc.group !== g ? '' : `
         <li class="componente" id="svc-${i}">
@@ -188,10 +384,10 @@ function renderSkeletons() {
               <a href="${esc(svc.url)}" target="_blank" rel="noopener">${esc(svc.name)}</a>
               <span class="comp-url">${esc(svc.url.replace('https://', ''))}</span>
             </div>
-            <span class="estado checking" id="lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>verificando</span></span>
+            <span class="estado checking" id="lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>${esc(t('st_checking'))}</span></span>
           </div>
           <p class="comp-nota" id="hist-${i}"></p>
-          <div class="barras" id="barras-${i}" role="img" aria-label="histórico de ${esc(svc.name)} ainda não carregado"></div>
+          <div class="barras" id="barras-${i}" role="img" aria-label="${esc(t('hist_loading', svc.name))}"></div>
           <div class="barras-rodape" aria-hidden="true">
             <span id="barras-ini-${i}"></span>
             <span class="uptime" id="uptime-${i}"></span>
@@ -205,7 +401,7 @@ function renderSkeletons() {
             <button class="checks-toggle" id="toggle-${i}" type="button" aria-expanded="false"
                     aria-controls="checks-${i}" data-action="checks" data-i="${i}" hidden></button>
           </div>
-          <ul class="checks" id="checks-${i}" aria-label="verificações de ${esc(svc.name)}"></ul>
+          <ul class="checks" id="checks-${i}" aria-label="${esc(t('checks_of', svc.name))}"></ul>
         </li>`).join('')}
       </ul>
     </div>`).join('');
@@ -217,7 +413,7 @@ function renderThirdPartySkeletons() {
     <li>
       <a class="tp" href="${esc(svc.page)}" target="_blank" rel="noopener">
         <span class="tp-info"><span class="tp-nome">${esc(svc.name)}</span><span class="tp-desc" id="tp-desc-${i}">${esc(svc.page.replace('https://', ''))}</span></span>
-        <span class="estado checking" id="tp-lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>verificando</span></span>
+        <span class="estado checking" id="tp-lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>${esc(t('st_checking'))}</span></span>
       </a>
     </li>`).join('');
 }
@@ -254,12 +450,12 @@ function renderChecks(i, result) {
   panel.innerHTML = checks.map(c => {
     const e = estadoDe(c.status);
     const quando = c.verificadoEm && Number.isFinite(Date.parse(c.verificadoEm))
-      ? ` <span class="check-quando">· conferido ${timeTag(Date.parse(c.verificadoEm), 'às ' + hora(Date.parse(c.verificadoEm)))}</span>` : '';
+      ? ` <span class="check-quando">· ${esc(t('checked_at', '')).trim()} ${timeTag(Date.parse(c.verificadoEm), hora(Date.parse(c.verificadoEm)))}</span>` : '';
     return `
     <li class="check ${esc(c.status)}">
       <span class="check-ic" aria-hidden="true">${e.ic}</span>
       <span class="check-label"><span class="sr-only">${esc(e.txt)}: </span>${esc(c.label)}${quando}</span>
-      <span class="check-detail">${esc(c.detail || (c.status === 'up' ? 'ok' : e.txt))}</span>
+      <span class="check-detail">${esc(c.detail || (c.status === 'up' ? t('ok') : e.txt))}</span>
     </li>`;
   }).join('');
 
@@ -269,9 +465,7 @@ function renderChecks(i, result) {
   const aberto = problems > 0 || panel.classList.contains('show');
   panel.classList.toggle('show', aberto);
   toggle.setAttribute('aria-expanded', aberto ? 'true' : 'false');
-  toggle.dataset.rotulo = problems > 0
-    ? `${problems} problema${problems > 1 ? 's' : ''}`
-    : `${checks.length} verificaç${checks.length > 1 ? 'ões' : 'ão'} ok`;
+  toggle.dataset.rotulo = problems > 0 ? t('n_problems', problems) : t('n_checks_ok', checks.length);
   toggle.textContent = `${aberto ? '▾' : '▸'} ${toggle.dataset.rotulo}`;
 }
 
@@ -301,14 +495,14 @@ function applyServiceNotes(historico) {
     const inc = svcs[s.name] && svcs[s.name].lastIncident;
     if (inc) {
       partes.push(inc.resolved
-        ? `esteve ${esc(statusLabel(inc.severity))} ${timeTag(Date.parse(inc.endedAt), 'há ' + fmtAge(inc.agoMs))} · durou ${esc(fmtDur(inc.durationMs))}`
-        : `<span class="${esc(inc.severity)}">${esc(statusLabel(inc.severity))} ${timeTag(Date.parse(inc.startedAt), 'há ' + fmtAge(inc.durationMs))}</span>`);
+        ? t('was', esc(statusLabel(inc.severity)), timeTag(Date.parse(inc.endedAt), t('ago', fmtAge(inc.agoMs))), esc(fmtDur(inc.durationMs)))
+        : `<span class="${esc(inc.severity)}">${esc(statusLabel(inc.severity))} ${timeTag(Date.parse(inc.startedAt), t('ago', fmtAge(inc.durationMs)))}</span>`);
     }
     const r = resultados.find(x => x.name === s.name);
     const v = versaoDe(r);
     const em = v && Date.parse(v.em);
     if (v && Number.isFinite(em) && Date.now() - em < 48 * 3600000) {
-      partes.push(`<span class="selo" title="versão ${esc(v.id)}">deploy ${esc(v.tag || v.id.slice(0, 8))} ${timeTag(em, 'há ' + fmtAge(Date.now() - em))}</span>`);
+      partes.push(`<span class="selo" title="${esc(t('version'))} ${esc(v.id)}">deploy ${esc(v.tag || v.id.slice(0, 8))} ${timeTag(em, t('ago', fmtAge(Date.now() - em)))}</span>`);
     }
     el.innerHTML = partes.join(' · ');
   });
@@ -320,7 +514,7 @@ function rotuloPeriodo(barras, k) {
   if (!p) return '';
   if (barras.tipo === 'diario') {
     const [y, m, d] = p.inicio.split('-').map(Number);
-    return new Date(y, m - 1, d).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' }).replace('.', '');
+    return new Date(y, m - 1, d).toLocaleDateString(locale(), { day: '2-digit', month: 'short', year: 'numeric' }).replace('.', '');
   }
   const ini = Date.parse(p.inicio);
   return `${dia(ini)}, ${hora(ini)}–${hora(ini + 3600000)}`;
@@ -329,12 +523,12 @@ function rotuloPeriodo(barras, k) {
 function descreveBarra(barras, nome, k) {
   const b = (barras.servicos[nome] || [])[k] || { estado: null };
   const quando = rotuloPeriodo(barras, k);
-  if (!b.estado) return `${quando}: sem dado`;
+  if (!b.estado) return `${quando}: ${t('no_data_bar')}`;
   const partes = [`${quando}: ${statusLabel(b.estado)}`];
-  if (b.pct != null) partes.push(`${fmtPct(b.pct)} disponível`);
-  if (b.fora) partes.push(`${b.fora} varredura${b.fora > 1 ? 's' : ''} fora do ar`);
-  if (b.lentas) partes.push(`${b.lentas} degradada${b.lentas > 1 ? 's' : ''}`);
-  if (b.varreduras) partes.push(`de ${b.varreduras}`);
+  if (b.pct != null) partes.push(t('available', fmtPct(b.pct)));
+  if (b.fora) partes.push(t('n_down_sweeps', b.fora));
+  if (b.lentas) partes.push(t('n_slow', b.lentas));
+  if (b.varreduras) partes.push(t('of_n', b.varreduras));
   return partes.join(' · ');
 }
 
@@ -356,8 +550,8 @@ function renderBarras(barras) {
   const diario = barrasAtuais && barrasAtuais.tipo === 'diario';
   const n = barrasAtuais ? barrasAtuais.periodos.length : 0;
   if (legenda) {
-    legenda.textContent = !barrasAtuais ? 'histórico indisponível'
-      : diario ? `${n} dias · 1 barra por dia` : `${n} h · 1 barra por hora (sem banco: reconstruído das transições)`;
+    legenda.textContent = !barrasAtuais ? t('hist_unavailable')
+      : diario ? t('legend_daily', n) : t('legend_hourly', n);
   }
   SERVICES.forEach((s, i) => {
     const el = document.getElementById(`barras-${i}`);
@@ -367,7 +561,7 @@ function renderBarras(barras) {
     const up = document.getElementById(`uptime-${i}`);
     if (!barrasAtuais) {
       el.innerHTML = ''; el.className = 'barras';
-      el.setAttribute('aria-label', `histórico de ${s.name} indisponível`);
+      el.setAttribute('aria-label', t('hist_of_unavailable', s.name));
       if (ini) ini.textContent = ''; if (fim) fim.textContent = ''; if (up) up.textContent = '';
       return;
     }
@@ -379,17 +573,12 @@ function renderBarras(barras) {
     const conta = { up: 0, degraded: 0, down: 0, nd: 0 };
     for (const b of lista) conta[b.estado || 'nd']++;
     const pct = uptimeJanela(lista);
-    const unidade = diario ? 'dias' : 'h';
-    el.setAttribute('aria-label',
-      `${s.name}, últimos ${n} ${unidade}: ${pct == null ? 'sem dados' : fmtPct(pct) + ' disponível'}` +
-      `${conta.down ? `; ${conta.down} ${diario ? 'dias' : 'horas'} com queda` : ''}` +
-      `${conta.degraded ? `; ${conta.degraded} ${diario ? 'dias degradados' : 'horas degradadas'}` : ''}` +
-      `${conta.nd ? `; ${conta.nd} sem dado` : ''}`);
+    el.setAttribute('aria-label', t('bars_aria', s.name, n, diario, pct, conta.down, conta.degraded, conta.nd));
     if (ini) ini.innerHTML = diario
-      ? `<span class="so-largo">${n} dias atrás</span><span class="so-estreito">30 dias atrás</span>`
-      : `<span class="so-largo">${n} h atrás</span><span class="so-estreito">24 h atrás</span>`;
-    if (fim) fim.textContent = diario ? 'hoje' : 'agora';
-    if (up) up.textContent = pct == null ? 'sem dados ainda' : `${fmtPct(pct)} disponível`;
+      ? `<span class="so-largo">${esc(t('days_ago', n))}</span><span class="so-estreito">${esc(t('days_ago', 30))}</span>`
+      : `<span class="so-largo">${esc(t('hours_ago', n))}</span><span class="so-estreito">${esc(t('hours_ago', 24))}</span>`;
+    if (fim) fim.textContent = diario ? t('today') : t('now');
+    if (up) up.textContent = pct == null ? t('no_data_yet') : t('available', fmtPct(pct));
   });
 }
 
@@ -426,22 +615,22 @@ function updateBanner(results) {
     .sort((a, b) => (a.status === 'down' ? 0 : 1) - (b.status === 'down' ? 0 : 1));
   const desde = (nome) => {
     const inc = historicoAtual && historicoAtual.services && historicoAtual.services[nome] && historicoAtual.services[nome].lastIncident;
-    return inc && !inc.resolved ? ` há ${fmtAge(inc.durationMs)}` : '';
+    return inc && !inc.resolved ? ' ' + t('ago', fmtAge(inc.durationMs)) : '';
   };
   let estado, titulo, detalhe;
   if (!ruins.length) {
-    estado = 'up'; titulo = 'Todos os sistemas operacionais';
-    detalhe = `${results.length} serviços verificados`;
+    estado = 'up'; titulo = t('all_up');
+    detalhe = t('n_checked', results.length);
   } else if (ruins.length === results.length) {
-    estado = 'down'; titulo = 'Interrupção generalizada';
-    detalhe = 'nenhum serviço respondeu como deveria';
+    estado = 'down'; titulo = t('all_down');
+    detalhe = t('all_down_sub');
   } else if (ruins.length === 1) {
     const r = ruins[0];
     estado = r.status; titulo = `${r.name} ${statusLabel(r.status)}${desde(r.name)}`;
     detalhe = (r.problems && r.problems[0]) || '';
   } else {
     estado = ruins.some(r => r.status === 'down') ? 'down' : 'degraded';
-    titulo = `${ruins.length} serviços com problema`;
+    titulo = t('n_bad', ruins.length);
     detalhe = ruins.map(r => `${r.name} ${statusLabel(r.status)}${desde(r.name)}`).join(' · ');
   }
   faixa.className = `faixa estado-${estado}`;
@@ -454,9 +643,9 @@ function updateBanner(results) {
 function showBannerUnknown() {
   document.getElementById('banner').className = 'faixa estado-unknown';
   document.getElementById('banner-icone').textContent = '?';
-  document.getElementById('banner-text').textContent = 'Sem resposta do servidor de status';
-  document.getElementById('banner-sub').textContent = 'estado desconhecido — nova tentativa automática';
-  anunciar('Sem resposta do servidor de status');
+  document.getElementById('banner-text').textContent = t('no_answer');
+  document.getElementById('banner-sub').textContent = t('no_answer_sub');
+  anunciar(t('no_answer'));
 }
 
 // Leitor de tela ouve a MUDANÇA, não cada atualização silenciosa.
@@ -476,17 +665,17 @@ function updateLastChecked() {
   if (ultimaVarredura != null) {
     // Relógio do navegador adiantado não pode produzir idade negativa.
     const idade = Math.max(0, agora - ultimaVarredura);
-    partes.push('verificado ' + timeTag(ultimaVarredura, idade < 60000 ? 'agora há pouco' : 'há ' + fmtAge(idade)));
+    partes.push(esc(t('checked')) + ' ' + timeTag(ultimaVarredura, idade < 60000 ? t('just_now') : t('ago', fmtAge(idade))));
   } else {
-    partes.push('ainda sem verificação');
+    partes.push(esc(t('never_checked')));
   }
-  if (falhasSeguidas > 0) partes.push('<span class="stale">sem resposta do servidor</span>');
-  else if (retratoAtrasado) partes.push('<span class="stale">agendador atrasado</span>');
+  if (falhasSeguidas > 0) partes.push(`<span class="stale">${esc(t('server_silent'))}</span>`);
+  else if (retratoAtrasado) partes.push(`<span class="stale">${esc(t('scheduler_late'))}</span>`);
   if (proximaEm != null) {
     const falta = Math.max(0, proximaEm - agora);
-    partes.push('próxima atualização em ' + (falta < 60000 ? 'menos de 1 min' : fmtAge(falta)));
+    partes.push(esc(t('next_in', falta < 60000 ? t('lt_1min') : fmtAge(falta))));
   } else if (document.hidden) {
-    partes.push('pausado (aba em segundo plano)');
+    partes.push(esc(t('paused')));
   }
   el.innerHTML = partes.join(' · ');
 }
@@ -522,14 +711,14 @@ function renderIncidentes(historico) {
   const el = document.getElementById('incidentes');
   if (!el) return;
   if (!historico || historico.erro || historico.available === false) {
-    el.innerHTML = `<p class="vazio">histórico indisponível${historico && historico.detail ? ' — ' + esc(historico.detail) : ''}</p>`;
+    el.innerHTML = `<p class="vazio">${esc(t('hist_unavailable'))}${historico && historico.detail ? ' — ' + esc(historico.detail) : ''}</p>`;
     return;
   }
   const incs = montaIncidentes(historico.entries || []);
   const flap = (historico.flapping || []).length
-    ? `<p class="vazio aviso">instável: ${esc(historico.flapping.map(f => `${f.name} (${f.changes} mudanças)`).join(' · '))}</p>` : '';
+    ? `<p class="vazio aviso">${esc(t('unstable', historico.flapping.map(f => `${f.name} (${t('n_changes', f.changes)})`).join(' · ')))}</p>` : '';
   if (!incs.length) {
-    el.innerHTML = `<p class="vazio">Nenhum incidente nas últimas 48 h.</p>${flap}`;
+    el.innerHTML = `<p class="vazio">${esc(t('no_incidents'))}</p>${flap}`;
     return;
   }
   const hoje = new Date().toDateString();
@@ -537,7 +726,7 @@ function renderIncidentes(historico) {
   const grupos = new Map();
   for (const inc of incs) {
     const d = new Date(inc.inicio).toDateString();
-    const rot = d === hoje ? 'hoje' : d === ontem ? 'ontem' : dia(inc.inicio);
+    const rot = d === hoje ? t('today') : d === ontem ? t('yesterday') : dia(inc.inicio);
     if (!grupos.has(rot)) grupos.set(rot, []);
     grupos.get(rot).push(inc);
   }
@@ -548,8 +737,8 @@ function renderIncidentes(historico) {
         ${lista.map(inc => {
           const e = estadoDe(inc.pior);
           const quando = inc.fim == null
-            ? `<span class="inc-aberto">em andamento</span> · desde ${timeTag(inc.inicio, hora(inc.inicio))} (${esc(fmtDur(Date.now() - inc.inicio))})`
-            : `${timeTag(inc.inicio, hora(inc.inicio))} → ${timeTag(inc.fim, hora(inc.fim))} · durou ${esc(fmtDur(inc.fim - inc.inicio))}`;
+            ? `<span class="inc-aberto">${esc(t('ongoing'))}</span> · ${esc(t('since'))} ${timeTag(inc.inicio, hora(inc.inicio))} (${esc(fmtDur(Date.now() - inc.inicio))})`
+            : `${timeTag(inc.inicio, hora(inc.inicio))} → ${timeTag(inc.fim, hora(inc.fim))} · ${esc(t('lasted'))} ${esc(fmtDur(inc.fim - inc.inicio))}`;
           return `
           <li class="inc ${esc(inc.pior)}">
             <span class="inc-ic" aria-hidden="true">${e.ic}</span>
@@ -621,17 +810,17 @@ function renderLatency(data, implantacoes) {
         <div class="lat">
           <span class="lat-name">${esc(name)}${dep.length ? ' <span class="selo">deploy</span>' : ''}</span>
           ${sparkline(pontos, sev, dep)}
-          <span class="lat-trend ${esc(t.direction)}" title="mediana recente vs. anterior">${esc(trendTxt)}</span>
+          <span class="lat-trend ${esc(t.direction)}" title="${esc(t('trend_title'))}">${esc(trendTxt)}</span>
           <span class="lat-val">p50 ${v.p50} ms · p95 ${v.p95} ms</span>
         </div>`;
     }).join('');
 
   const worsening = (data.worsening || []).length
-    ? `<div class="panel-empty aviso mt">ficando mais lento: ${
-        esc(data.worsening.map(w => `${w.name} (+${w.deltaPct} %)`).join(' · '))}</div>`
+    ? `<div class="panel-empty aviso mt">${
+        esc(t('slowing', data.worsening.map(w => `${w.name} (+${w.deltaPct} %)`).join(' · ')))}</div>`
     : '';
   panel.innerHTML = rows + worsening +
-    `<div class="panel-empty mt">${data.samples} amostras · ${data.intervalMinutes ? `1 a cada ${data.intervalMinutes} min` : '1 por varredura'} · linha tracejada = deploy</div>`;
+    `<div class="panel-empty mt">${esc(t('samples', data.samples, data.intervalMinutes))}</div>`;
 }
 
 // ── Terceiros ───────────────────────────────────────────────────────────
@@ -655,11 +844,11 @@ function renderQuotas(data) {
   if (!section || !panel) return;
   section.hidden = false;
   if (!data || data.erro) {
-    panel.innerHTML = `<div class="panel-empty aviso">cotas não lidas agora${data && data.erro ? ' — ' + esc(data.erro) : ''}</div>`;
+    panel.innerHTML = `<div class="panel-empty aviso">${esc(t('quotas_unread'))}${data && data.erro ? ' — ' + esc(data.erro) : ''}</div>`;
     return;
   }
   if (!data.configured) {
-    panel.innerHTML = `<div class="panel-empty">não monitorado — ${esc(data.detail || 'sem token da API da Cloudflare')}</div>`;
+    panel.innerHTML = `<div class="panel-empty">${esc(t('not_monitored'))} — ${esc(data.detail || t('no_cf_token'))}</div>`;
     return;
   }
   const quotas = (data.quotas || []).map(q => {
@@ -667,7 +856,7 @@ function renderQuotas(data) {
     // Uma barra que não pinta nada lê como "sem dado"; consumo pequeno mas
     // real ganha um fio visível.
     const width = q.pct == null ? 0 : Math.min(100, q.pct > 0 ? Math.max(q.pct, 1.5) : 0);
-    const val = q.used == null ? 'sem dados' : `${fmt(q.used)} / ${fmt(q.limit)}${q.pct != null ? ` · ${String(q.pct).replace('.', ',')} %` : ''}`;
+    const val = q.used == null ? t('st_unknown') : `${fmt(q.used)} / ${fmt(q.limit)}${q.pct != null ? ` · ${String(q.pct).replace('.', ',')} %` : ''}`;
     return `
       <div class="quota">
         <span class="quota-label">${esc(q.label)}</span>
@@ -686,7 +875,7 @@ function renderQuotas(data) {
     </div>`;
   }).join('');
   const errors = (data.errors || []).length
-    ? `<div class="panel-empty aviso">não lido: ${esc(data.errors.join(' · '))}</div>` : '';
+    ? `<div class="panel-empty aviso">${esc(t('unread', data.errors.join(' · ')))}</div>` : '';
   panel.innerHTML = quotas + certs + detalheWorkers(data) + errors +
     (data.note ? `<div class="panel-empty mt">${esc(data.note)}</div>` : '');
   // Largura das barras pelo CSSOM: atributo de estilo no HTML a CSP bloqueia.
@@ -702,9 +891,9 @@ function detalheWorkers(data) {
   if (ws && ws.length) {
     html += `
       <table class="tabela">
-        <caption>Por Worker, hoje</caption>
+        <caption>${esc(t('per_worker'))}</caption>
         <colgroup><col class="c-script" /><col /><col /><col /></colgroup>
-        <thead><tr><th scope="col">script</th><th scope="col">requisições</th><th scope="col">erros</th><th scope="col">CPU p50 / p99</th></tr></thead>
+        <thead><tr><th scope="col">${esc(t('th_script'))}</th><th scope="col">${esc(t('th_req'))}</th><th scope="col">${esc(t('th_err'))}</th><th scope="col">CPU p50 / p99</th></tr></thead>
         <tbody>${ws.map(w => `
           <tr>
             <th scope="row" title="${esc(w.script)}">${esc(w.script)}</th>
@@ -723,18 +912,18 @@ function detalheWorkers(data) {
       const pct = h.requests ? (h.errors / h.requests) * 100 : 0;
       const cls = !h.requests ? 'nd' : pct >= 5 ? 'down' : pct > 0 ? 'degraded' : 'up';
       const quando = hora(Date.parse(h.hora));
-      return `<span class="b ${cls}" title="${esc(`${quando}: ${fmtNum(h.requests)} requisições · ${fmtNum(h.errors)} erros · CPU p99 ${h.cpuP99Ms ?? '—'} ms`)}"></span>`;
+      return `<span class="b ${cls}" title="${esc(t('hourly_bar', quando, fmtNum(h.requests), fmtNum(h.errors), h.cpuP99Ms ?? '—'))}"></span>`;
     }).join('');
     html += `
       <div class="por-hora">
-        <p class="por-hora-titulo">${esc(ph.script)} · últimas 24 h, por hora</p>
-        <div class="barras curtas" role="img" aria-label="${esc(`${ph.script}, últimas 24 horas: ${fmtNum(tot.r)} requisições, ${fmtNum(tot.e)} com erro, CPU p99 máxima ${cpuMax} ms`)}">${barras}</div>
-        <p class="panel-empty">${fmtNum(tot.r)} requisições · ${fmtNum(tot.e)} com erro · CPU p99 máx. ${String(cpuMax).replace('.', ',')} ms</p>
+        <p class="por-hora-titulo">${esc(t('hourly_title', ph.script))}</p>
+        <div class="barras curtas" role="img" aria-label="${esc(t('hourly_aria', ph.script, fmtNum(tot.r), fmtNum(tot.e), cpuMax))}">${barras}</div>
+        <p class="panel-empty">${esc(t('hourly_sum', fmtNum(tot.r), fmtNum(tot.e), lang === 'en' ? String(cpuMax) : String(cpuMax).replace('.', ',')))}</p>
       </div>`;
   }
   const dobj = data.durableObjects;
   if (dobj && dobj.requests != null) {
-    html += `<div class="panel-empty mt">Durable Objects hoje: ${fmtNum(dobj.requests)} requisições${
+    html += `<div class="panel-empty mt">${esc(t('do_today', fmtNum(dobj.requests)))}${
       (dobj.porScript || []).length ? ' (' + esc(dobj.porScript.map(d => `${d.script} ${fmtNum(d.requests)}`).join(' · ')) + ')' : ''}</div>`;
   }
   return html;
@@ -750,7 +939,7 @@ async function runChecks(manual) {
 
   const btn = document.getElementById('btn-refresh');
   btn.disabled = true;
-  btn.textContent = '↻ atualizando…';
+  btn.textContent = t('refreshing');
 
   let ok = true;
 
@@ -776,6 +965,7 @@ async function runChecks(manual) {
   }
 
   function aplicarPainel(painel) {
+    ultimoPainel = painel;
     historicoAtual = painel.historico && !painel.historico.erro ? painel.historico : null;
     applyThirdParty(painel.terceiros);
     renderQuotas(painel.cotas);
@@ -811,32 +1001,104 @@ async function runChecks(manual) {
   ultimaAtualizacao = Date.now();
 
   btn.disabled = false;
-  btn.textContent = '↻ atualizar';
+  btn.textContent = t('refresh');
   checking = false;
 
   agendar();
   updateLastChecked();
 }
 
-// ── Tema e inscrição ────────────────────────────────────────────────────
-function rotuloTema(atual) { return atual === 'dark' ? 'claro' : 'escuro'; }
+// ── Tema, idioma e inscrição ────────────────────────────────────────────
+function rotuloTema(atual) { return atual === 'dark' ? t('theme_light') : t('theme_dark'); }
+
+function pintaBotaoTema() {
+  const atual = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  const btn = document.getElementById('btn-theme');
+  btn.textContent = rotuloTema(atual);
+  btn.setAttribute('aria-label', t('theme_aria', rotuloTema(atual)));
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = atual === 'light' ? '#f4efe6' : '#0d0c0a';
+}
+
+function salvaPref(k, v) {
+  if (window.lfPrefs && window.lfPrefs.save) window.lfPrefs.save(k, v);
+}
 
 function toggleTheme() {
   const html = document.documentElement;
   const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   html.setAttribute('data-theme', next);
-  try { localStorage.setItem('theme', next); } catch (e) { /* modo privado: o tema vale só nesta visita */ }
-  const btn = document.getElementById('btn-theme');
-  btn.textContent = rotuloTema(next);
-  btn.setAttribute('aria-label', `mudar para o tema ${rotuloTema(next)}`);
+  salvaPref('theme', next);
+  pintaBotaoTema();
+}
+
+// Trocar o idioma redesenha a partir do estado que já está na memória: nada
+// de rede, e a próxima atualização segue no horário marcado.
+function toggleLang() {
+  lang = lang === 'en' ? 'pt' : 'en';
+  salvaPref('lang', lang);
+  aplicarIdiomaHtml();
+  pintaBotaoTema();
+  renderSkeletons();
+  renderThirdPartySkeletons();
+  resultados.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
+  if (ultimoPainel) {
+    applyThirdParty(ultimoPainel.terceiros);
+    renderQuotas(ultimoPainel.cotas);
+    renderIncidentes(ultimoPainel.historico);
+    renderBarras(ultimoPainel.barras);
+    applyUptime(ultimoPainel.uptime);
+    applyServiceNotes(historicoAtual);
+    renderLatency(ultimoPainel.latencia, ultimoPainel.implantacoes);
+  }
+  if (resultados.length) updateBanner(resultados);
+  else if (ultimaVarredura == null && falhasSeguidas > 0) showBannerUnknown();
+  const btn = document.getElementById('btn-refresh');
+  if (btn && !checking) btn.textContent = t('refresh');
+  const ok = document.getElementById('sub-ok-btn');
+  if (ok && !ok.disabled) ok.textContent = t('sub_button');
+  updateLastChecked();
+}
+
+// Turnstile só existe quando o servidor diz que está configurado (GET
+// /api/subscribe). O script da Cloudflare é carregado sob demanda, na primeira
+// vez que alguém abre a inscrição.
+let turnstileSiteKey = null;
+let turnstileWidget = null;
+let turnstilePronto = null;
+function prepararTurnstile() {
+  if (turnstilePronto) return turnstilePronto;
+  turnstilePronto = getJson('/api/subscribe').then((cfg) => {
+    turnstileSiteKey = cfg && typeof cfg.turnstile === 'string' ? cfg.turnstile : null;
+    if (!turnstileSiteKey) return;
+    return new Promise((resolve) => {
+      const sc = document.createElement('script');
+      sc.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      sc.async = true;
+      sc.setAttribute('data-cfasync', 'false');
+      sc.onload = () => {
+        const alvo = document.getElementById('sub-turnstile');
+        if (window.turnstile && alvo) {
+          alvo.hidden = false;
+          turnstileWidget = window.turnstile.render(alvo, { sitekey: turnstileSiteKey, theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark', language: lang === 'en' ? 'en' : 'pt-br' });
+        }
+        resolve();
+      };
+      sc.onerror = () => resolve();
+      document.head.appendChild(sc);
+    });
+  }).catch(() => { turnstilePronto = null; });
+  return turnstilePronto;
 }
 
 function showSubscribe() {
   mostra('inscricao', true);
   mostra('sub-form', true);
-  ['sub-done', 'sub-already', 'sub-error'].forEach(id => mostra(id, false));
+  mostra('sub-consent', true);
+  ['sub-done', 'sub-error'].forEach(id => mostra(id, false));
   document.getElementById('btn-inscrever').setAttribute('aria-expanded', 'true');
   document.getElementById('sub-email').focus();
+  prepararTurnstile();
 }
 
 function hideSubscribe() {
@@ -848,7 +1110,7 @@ function hideSubscribe() {
 
 function showSubError(msg) {
   const el = document.getElementById('sub-error-msg');
-  if (el) el.textContent = msg || 'Erro — tente novamente.';
+  if (el) el.textContent = msg || t('sub_error');
   mostra('sub-error', true);
 }
 
@@ -856,9 +1118,14 @@ async function doSubscribe() {
   const input = document.getElementById('sub-email');
   const email = input.value.trim();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    showSubError('Confira o endereço de e-mail.');
+    showSubError(t('sub_bad_email'));
     input.focus();
     return;
+  }
+  let turnstile;
+  if (turnstileSiteKey) {
+    turnstile = window.turnstile && turnstileWidget != null ? window.turnstile.getResponse(turnstileWidget) : '';
+    if (!turnstile) { showSubError(t('sub_captcha')); return; }
   }
   const btn = document.getElementById('sub-ok-btn');
   btn.disabled = true;
@@ -868,44 +1135,38 @@ async function doSubscribe() {
     const res = await fetch('/api/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, turnstile }),
     });
     const data = await res.json();
-    if (data.already) {
+    if (data.ok) {
       mostra('sub-form', false);
-      mostra('sub-already', true);
-    } else if (data.ok) {
-      mostra('sub-form', false);
+      mostra('sub-consent', false);
       mostra('sub-done', true);
     } else {
-      showSubError(data.error);
+      // A mensagem do servidor é em português; em inglês, a genérica.
+      showSubError(lang === 'pt' ? data.error : t('sub_error'));
+      if (window.turnstile && turnstileWidget != null) window.turnstile.reset(turnstileWidget);
     }
   } catch (e) {
-    showSubError('Falha de rede — tente novamente.');
+    showSubError(t('sub_network'));
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Inscrever';
+    btn.textContent = t('sub_button');
   }
 }
 
 // ── Início ──────────────────────────────────────────────────────────────
-try {
-  const stored = localStorage.getItem('theme');
-  const sysPref = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  const t = stored || sysPref;
-  const btn = document.getElementById('btn-theme');
-  btn.textContent = rotuloTema(t);
-  btn.setAttribute('aria-label', `mudar para o tema ${rotuloTema(t)}`);
-} catch (e) { /* sem localStorage: fica o rótulo padrão */ }
+aplicarIdiomaHtml();
+pintaBotaoTema();
 
 // Um listener só, por delegação (como no fotos): atributo `onclick` no HTML
 // é script inline, e a CSP não aceita. O botão diz o que faz em data-action.
 const ACOES = {
   tema: () => toggleTheme(),
+  idioma: () => toggleLang(),
   atualizar: () => runChecks(true),
   'inscrever-abrir': () => { if (document.getElementById('inscricao').hidden) showSubscribe(); else hideSubscribe(); },
   'inscrever-fechar': () => hideSubscribe(),
-  inscrever: () => doSubscribe(),
   checks: (el) => toggleChecks(Number(el.dataset.i)),
   barra: (el) => mostraBarra(el),
 };
@@ -920,8 +1181,12 @@ document.addEventListener('pointerover', (ev) => {
   const el = ev.target instanceof Element ? ev.target.closest('.b[data-action="barra"]') : null;
   if (el) mostraBarra(el);
 });
+// Formulário de verdade: Enter envia, e o navegador trata o campo como tal.
+document.getElementById('sub-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  doSubscribe();
+});
 document.getElementById('sub-email').addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter') doSubscribe();
   if (ev.key === 'Escape') hideSubscribe();
 });
 
