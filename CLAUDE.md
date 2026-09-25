@@ -8,7 +8,8 @@ The ecosystem's status page: a static page plus Cloudflare Pages Functions that 
 |---|---|
 | `index.html`, `app.js`, `app.css`, `tema.js` | Page. `tema.js` is sync in `<head>` (theme/lang before paint, `window.lfPrefs`); `app.js` does everything else |
 | `functions/api/status.js` | `SERVICES` (what's checked, the markers), the sweep (`varrer`), change detection and alerts (`detectAndNotify` → `sendAlerts`) |
-| `functions/api/painel.js` | Everything the page reads, in one call |
+| `functions/api/painel.js` | Everything the page reads, in one call (same origin only: no CORS, ~90 KB) |
+| `functions/api/resumo.js` | Tiny public summary with `Access-Control-Allow-Origin: *` for other sites (the lucafchala.com homepage dots). Reads the D1 snapshot only; never sweeps |
 | `functions/api/retrato.js` | D1 snapshot, global sweep lock, bars |
 | `functions/api/subscribe.js` / `confirm.js` / `unsubscribe.js` | Double opt-in sign-up, confirmation, RFC 8058 unsubscribe |
 | `functions/api/third-party-status.js`, `quota-stats.js`, `status-history.js`, `latency-trends.js`, `healthz.js` | The other sections |
@@ -29,6 +30,7 @@ The ecosystem's status page: a static page plus Cloudflare Pages Functions that 
   - never let a client request shape an email.
 - **Public endpoints don't leak internals.** No binding names or subscriber counts in `/api/status`, `/api/healthz` (detail only with `X-Status-Token` = `STATUS_ADMIN_TOKEN`) or `/api/subscribe` errors. Raw upstream errors go to `console.error`.
 - **Unknown is not up.** Anything unread (a third-party page that 403s, a quota dataset that failed, a cert the token can't see) is `unknown`, not green and not red.
+- **Other sites read `/api/resumo`, never `/api/painel` or `/api/status`.** `/api/status` can sweep; the painel is heavy. Anything cross-origin must stay read-only, small, cached and CORS-open.
 - **GET never mutates.** Confirm and unsubscribe show a button on GET; the POST acts.
 - **i18n:** page chrome strings live in `S.pt` / `S.en` (`t(key, …)`), static markup uses `data-i18n` / `data-i18n-attr` with the PT text in the HTML and EN in `HTML_EN`. Server-provided text stays PT.
 - **Prefs:** `lf_theme` / `lf_lang` cookies on `.lucafchala.com`, shared with every sibling site.
