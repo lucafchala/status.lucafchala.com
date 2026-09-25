@@ -688,17 +688,17 @@ function montaIncidentes(entries) {
   const abertos = new Map();
   const lista = [];
   for (const e of entries.slice().reverse()) {
-    const t = Date.parse(e.at);
-    if (!Number.isFinite(t)) continue;
+    const em = Date.parse(e.at);
+    if (!Number.isFinite(em)) continue;
     const aberto = abertos.get(e.name);
     if (e.to !== 'up') {
       if (aberto) {
         if (e.to === 'down') aberto.pior = 'down';
       } else {
-        abertos.set(e.name, { nome: e.name, inicio: t, fim: null, pior: e.to, causa: (e.problems || [])[0] || '' });
+        abertos.set(e.name, { nome: e.name, inicio: em, fim: null, pior: e.to, causa: (e.problems || [])[0] || '' });
       }
     } else if (aberto) {
-      aberto.fim = t;
+      aberto.fim = em;
       lista.push(aberto);
       abertos.delete(e.name);
     }
@@ -766,10 +766,10 @@ function sparkline(pontos, status, deploys) {
   // zero ou um traço colado na borda de baixo.
   const span = max - min || 1;
   const t0 = pontos[0].t, t1 = pontos[pontos.length - 1].t, dt = t1 - t0 || 1;
-  const x = (t) => P + ((t - t0) / dt) * (W - P * 2);
+  const x = (ms) => P + ((ms - t0) / dt) * (W - P * 2);
   const d = pontos.map(p => `${x(p.t).toFixed(1)},${(H - P - ((p.v - min) / span) * (H - P * 2)).toFixed(1)}`);
-  const marcas = (deploys || []).filter(t => t >= t0 && t <= t1)
-    .map(t => `<line class="deploy" x1="${x(t).toFixed(1)}" x2="${x(t).toFixed(1)}" y1="0" y2="${H}"/>`).join('');
+  const marcas = (deploys || []).filter(ms => ms >= t0 && ms <= t1)
+    .map(ms => `<line class="deploy" x1="${x(ms).toFixed(1)}" x2="${x(ms).toFixed(1)}" y1="0" y2="${H}"/>`).join('');
   return `<svg class="lat-spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">${marcas}<path class="${esc(status)}" d="M${d.join('L')}"/></svg>`;
 }
 
@@ -802,15 +802,15 @@ function renderLatency(data, implantacoes) {
       const v = svcs[name];
       const pontos = chrono.filter(e => typeof e.rt[name] === 'number').map(e => ({ t: Date.parse(e.at), v: e.rt[name] }));
       const sev = v.p95 >= 2500 ? 'down' : v.p95 >= 1000 ? 'degraded' : 'up';
-      const t = v.trend;
-      const arrow = t.direction === 'piorando' ? '▲' : t.direction === 'melhorando' ? '▼' : '·';
-      const trendTxt = t.deltaPct == null ? '·' : `${arrow} ${Math.abs(t.deltaPct)} %`;
+      const tr = v.trend;
+      const arrow = tr.direction === 'piorando' ? '▲' : tr.direction === 'melhorando' ? '▼' : '·';
+      const trendTxt = tr.deltaPct == null ? '·' : `${arrow} ${Math.abs(tr.deltaPct)} %`;
       const dep = (deploys[name] || []).filter(Number.isFinite);
       return `
         <div class="lat">
           <span class="lat-name">${esc(name)}${dep.length ? ' <span class="selo">deploy</span>' : ''}</span>
           ${sparkline(pontos, sev, dep)}
-          <span class="lat-trend ${esc(t.direction)}" title="${esc(t('trend_title'))}">${esc(trendTxt)}</span>
+          <span class="lat-trend ${esc(tr.direction)}" title="${esc(t('trend_title'))}">${esc(trendTxt)}</span>
           <span class="lat-val">p50 ${v.p50} ms · p95 ${v.p95} ms</span>
         </div>`;
     }).join('');
@@ -929,6 +929,27 @@ function detalheWorkers(data) {
   return html;
 }
 
+// Cada seção do painel desenha isolada. Um erro de DESENHO — um bug nosso, não
+// da rede — subia até o catch da busca: contava como falha, a página dizia
+// "sem resposta do servidor" e espaçava as atualizações, e as seções depois
+// da quebrada nem chegavam a desenhar. Foi assim que um `t` sombreado em
+// renderLatency passou despercebido. Agora o erro fica na seção que quebrou
+// e no console, onde dá para achar.
+function desenharPainel(p) {
+  const secoes = [
+    ['terceiros', () => applyThirdParty(p.terceiros)],
+    ['cotas', () => renderQuotas(p.cotas)],
+    ['incidentes', () => renderIncidentes(p.historico)],
+    ['barras', () => renderBarras(p.barras)],
+    ['uptime', () => applyUptime(p.uptime)],
+    ['notas', () => applyServiceNotes(historicoAtual)],
+    ['latência', () => renderLatency(p.latencia, p.implantacoes)],
+  ];
+  for (const [nome, desenha] of secoes) {
+    try { desenha(); } catch (e) { console.error(`painel: a seção ${nome} não desenhou`, e); }
+  }
+}
+
 // ── Ciclo de atualização ────────────────────────────────────────────────
 async function runChecks(manual) {
   if (checking) return;
@@ -947,8 +968,8 @@ async function runChecks(manual) {
     resultados = data.services;
     resultados.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
     updateBanner(resultados);
-    const t = Date.parse(data.checkedAt);
-    ultimaVarredura = Number.isFinite(t) ? t : null;
+    const em = Date.parse(data.checkedAt);
+    ultimaVarredura = Number.isFinite(em) ? em : null;
     retratoAtrasado = !!(data.retrato && data.retrato.atrasado);
   }
 
@@ -967,13 +988,7 @@ async function runChecks(manual) {
   function aplicarPainel(painel) {
     ultimoPainel = painel;
     historicoAtual = painel.historico && !painel.historico.erro ? painel.historico : null;
-    applyThirdParty(painel.terceiros);
-    renderQuotas(painel.cotas);
-    renderIncidentes(painel.historico);
-    renderBarras(painel.barras);
-    applyUptime(painel.uptime);
-    applyServiceNotes(historicoAtual);
-    renderLatency(painel.latencia, painel.implantacoes);
+    desenharPainel(painel);
     if (resultados.length) updateBanner(resultados);
   }
 
@@ -1042,15 +1057,7 @@ function toggleLang() {
   renderSkeletons();
   renderThirdPartySkeletons();
   resultados.forEach(r => updateServiceRow(SERVICES.findIndex(s => s.name === r.name), r));
-  if (ultimoPainel) {
-    applyThirdParty(ultimoPainel.terceiros);
-    renderQuotas(ultimoPainel.cotas);
-    renderIncidentes(ultimoPainel.historico);
-    renderBarras(ultimoPainel.barras);
-    applyUptime(ultimoPainel.uptime);
-    applyServiceNotes(historicoAtual);
-    renderLatency(ultimoPainel.latencia, ultimoPainel.implantacoes);
-  }
+  if (ultimoPainel) desenharPainel(ultimoPainel);
   if (resultados.length) updateBanner(resultados);
   else if (ultimaVarredura == null && falhasSeguidas > 0) showBannerUnknown();
   const btn = document.getElementById('btn-refresh');
