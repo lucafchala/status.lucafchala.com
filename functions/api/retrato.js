@@ -22,7 +22,10 @@
 //               a série de 48 h não precisar abrir o payload;
 //   dia       — contagem por serviço por dia (fuso de São Paulo): é o que
 //               desenha as barras de 90 dias sem ler 13 mil linhas;
-//   trava     — a vez de varrer, global entre colos (ver tomarVez).
+//   trava     — a vez de varrer, global entre colos (ver tomarVez);
+//   marca     — um inteiro com nome, fora da poda de 48 h: o último pedido do
+//               agendador (ver marcarAgendador) e a conta diária de e-mails
+//               de confirmação (ver contarNoDia).
 
 export const JANELA_MS = 48 * 3600_000;          // série e retratos guardados
 export const DIAS_BARRAS = 90;                    // barras diárias por serviço
@@ -63,6 +66,10 @@ const ESQUEMA = [
    )`,
   'CREATE INDEX IF NOT EXISTS dia_dia ON dia(dia)',
   'CREATE TABLE IF NOT EXISTS trava (nome TEXT PRIMARY KEY, ate INTEGER NOT NULL)',
+  // Tabela nova num banco que já existe: o IF NOT EXISTS a cria no primeiro
+  // uso depois do deploy (cada isolate novo roda o esquema uma vez), sem
+  // migração à mão — o mesmo caminho por que as outras nasceram.
+  'CREATE TABLE IF NOT EXISTS marca (nome TEXT PRIMARY KEY, valor INTEGER NOT NULL)',
 ];
 
 // Por isolate: depois da primeira vez, nenhuma consulta a mais por pedido.
@@ -87,6 +94,21 @@ export async function tomarVez(DB, agora = Date.now(), intervalo = VARREDURA_MIN
   const ins = await DB.prepare("INSERT OR IGNORE INTO trava (nome, ate) VALUES ('varredura', ?)")
     .bind(agora + intervalo).run();
   return ins?.meta?.changes === 1;
+}
+
+// Conta um evento no dia (fuso de São Paulo) e diz se ainda cabia no teto.
+// Um upsert só, atômico como a trava: com o teto atingido, o `WHERE` do
+// DO UPDATE não casa e nada muda — `changes` 0 é a recusa. Custa uma linha
+// escrita por evento aceito e nenhuma por recusa; os dias velhos saem junto.
+export async function contarNoDia(DB, prefixo, teto, agora = Date.now()) {
+  await garantirEsquema(DB);
+  const hoje = `${prefixo}:${diaLocal(agora)}`;
+  const [upd] = await DB.batch([
+    DB.prepare(`INSERT INTO marca (nome, valor) VALUES (?, 1)
+                ON CONFLICT (nome) DO UPDATE SET valor = valor + 1 WHERE valor < ?`).bind(hoje, teto),
+    DB.prepare('DELETE FROM marca WHERE nome LIKE ? AND nome < ?').bind(`${prefixo}:%`, hoje),
+  ]);
+  return upd?.meta?.changes === 1;
 }
 
 export async function lerRetrato(DB) {

@@ -13,6 +13,7 @@ const terceiros = await import('../functions/api/third-party-status.js');
 const subscribe = await import('../functions/api/subscribe.js');
 const confirm = await import('../functions/api/confirm.js');
 const healthz = await import('../functions/api/healthz.js');
+const { d1Sqlite } = await import('./d1.mjs');
 
 function fakeKV(initial = {}) {
   const store = new Map(Object.entries(initial));
@@ -275,6 +276,90 @@ describe('inscrição com confirmação (double opt-in)', () => {
     const res = await subscribe.onRequestPost({ request: post({ email: 'b@x.co' }), env: ENV(kv, { TURNSTILE_SECRET_KEY: 's' }) });
     assert.equal(res.status, 403);
     assert.equal(kv.writesOf(subscribe.pendingKey(await subscribe.emailId('b@x.co'))), 0);
+  });
+});
+
+// Abuso da inscrição: cada confirmação é uma escrita de KV (cota da conta,
+// dividida com o fotos) e um envio pelo Resend para um endereço escolhido por
+// quem chama. As três portas que ficavam abertas: variações do mesmo
+// endereço, um /64 de IPv6 inteiro, e nenhum teto global.
+describe('inscrição: abuso', () => {
+  let n = 0;
+  const post = (email, ip = `10.9.${(n >> 8) & 255}.${n++ & 255}`) => new Request(`${ORIGIN}/api/subscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin', 'CF-Connecting-IP': ip },
+    body: JSON.stringify({ email }),
+  });
+  const kvWrites = (kv) => [...kv._store.keys()].filter((k) => k.startsWith('pending_sub:')).length;
+  function correio() {
+    const mails = [];
+    globalThis.fetch = async (u, init) => { mails.push(JSON.parse(init.body)); return new Response('{}'); };
+    return mails;
+  }
+
+  test('+tag e pontos do Gmail são a mesma caixa: um e-mail só, para o endereço digitado', async () => {
+    const kv = fakeKV({ subscribers: '[]' });
+    const mails = correio();
+    for (const email of ['ana+1@gmail.com', 'a.na+2@googlemail.com', 'ANA@gmail.com', 'an.a@gmail.com']) {
+      const res = await subscribe.onRequestPost({ request: post(email), env: ENV(kv) });
+      assert.deepEqual(await res.json(), { ok: true, pending: true });
+    }
+    assert.equal(mails.length, 1);
+    assert.deepEqual(mails[0].to, ['ana+1@gmail.com']);
+    assert.equal(kvWrites(kv), 1);
+    // Fora do Gmail o ponto é parte do endereço; o +tag, não.
+    assert.equal(subscribe.chaveDoEndereco('a.na+x@example.com'), 'a.na@example.com');
+  });
+
+  test('já inscrito com outra variação: resposta idempotente, sem e-mail', async () => {
+    const kv = fakeKV({ subscribers: JSON.stringify([{ email: 'bia+status@x.co', token: 't' }]) });
+    const mails = correio();
+    const res = await subscribe.onRequestPost({ request: post('bia@x.co'), env: ENV(kv) });
+    assert.deepEqual(await res.json(), { ok: true, pending: true });
+    assert.equal(mails.length, 0);
+  });
+
+  test('IPv6: a trava conta o /64, não cada endereço', async () => {
+    const kv = fakeKV({ subscribers: '[]' });
+    correio();
+    const codes = [];
+    for (let i = 1; i <= 8; i++) codes.push((await subscribe.onRequestPost({ request: post(`v6-${i}@x.co`, `2001:db8:77:1::${i.toString(16)}`), env: ENV(kv) })).status);
+    assert.ok(codes.includes(429), `esperava 429 no mesmo /64, veio ${codes.join(',')}`);
+    assert.equal(subscribe.chaveDoIp('2001:db8:77:1:aaaa::1'), subscribe.chaveDoIp('2001:0db8:0077:0001:ffff:1:2:3'));
+    assert.notEqual(subscribe.chaveDoIp('2001:db8:77:1::1'), subscribe.chaveDoIp('2001:db8:77:2::1'));
+    assert.equal(subscribe.chaveDoIp('::ffff:203.0.113.5'), '203.0.113.5');
+    assert.equal(subscribe.chaveDoIp('203.0.113.5'), '203.0.113.5');
+  });
+
+  test('com STATUS_DB: teto diário de confirmações, recusa sem escrita de KV, e zera no dia seguinte', async () => {
+    const kv = fakeKV({ subscribers: '[]' });
+    const DB = d1Sqlite();
+    const mails = correio();
+    const teto = subscribe.MAX_CONFIRMACOES_DIA;
+    const codes = [];
+    for (let i = 0; i < teto + 3; i++) codes.push((await subscribe.onRequestPost({ request: post(`c${i}@x.co`), env: ENV(kv, { STATUS_DB: DB }) })).status);
+    assert.equal(mails.length, teto);
+    assert.equal(kvWrites(kv), teto, 'recusa não gasta escrita de KV');
+    assert.deepEqual(codes.slice(teto), [429, 429, 429]);
+    // Já inscrito/pendente não gasta vaga nem é recusado pelo teto.
+    const dup = await subscribe.onRequestPost({ request: post('c0@x.co'), env: ENV(kv, { STATUS_DB: DB }) });
+    assert.equal(dup.status, 200);
+    // Dia seguinte em São Paulo: a conta recomeça, e a linha velha sai.
+    clock += 24 * 3600_000;
+    const amanha = await subscribe.onRequestPost({ request: post('novo-dia@x.co'), env: ENV(kv, { STATUS_DB: DB }) });
+    assert.equal(amanha.status, 200);
+    assert.equal(DB.sqlite.prepare("SELECT COUNT(*) AS n FROM marca WHERE nome LIKE 'confirmacoes:%'").get().n, 1);
+  });
+
+  test('com STATUS_DB fora do ar: recusa (503) sem escrever no KV nem mandar e-mail', async () => {
+    const kv = fakeKV({ subscribers: '[]' });
+    const mails = correio();
+    const quebrado = { prepare() { throw new Error('D1 down'); }, async batch() { throw new Error('D1 down'); } };
+    const res = await subscribe.onRequestPost({ request: post('d1@x.co'), env: ENV(kv, { STATUS_DB: quebrado }) });
+    assert.equal(res.status, 503);
+    assert.doesNotMatch(await res.text(), /D1|STATUS_DB/);
+    assert.equal(mails.length, 0);
+    assert.equal(kvWrites(kv), 0);
   });
 });
 
