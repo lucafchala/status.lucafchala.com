@@ -214,7 +214,7 @@ function checkDados(labelJson, labelFrescor, url, validate, opts) {
 // minutes, which is the opposite of what a monitor should do.
 async function checkResend(label, env) {
   const key = env?.RESEND_API_KEY;
-  if (!key) return { label, status: 'degraded', detail: 'RESEND_API_KEY ausente (sem alertas)' };
+  if (!key) return { label, status: 'degraded', detail: 'chave de envio não configurada (sem alertas)' };
 
   const from = env.NOTIFY_FROM || 'status@lucafchala.com';
   const domain = from.split('@')[1] || '';

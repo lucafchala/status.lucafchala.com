@@ -289,7 +289,7 @@ export async function onRequestGet(context) {
   const DB = context.env.STATUS_DB;
   const headers = { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' };
   if (!DB) {
-    return new Response(JSON.stringify({ configurado: false, detalhe: 'STATUS_DB não configurado — sem retrato compartilhado' }), { headers });
+    return new Response(JSON.stringify({ configurado: false, detalhe: 'retrato compartilhado não configurado' }), { headers });
   }
   try {
     const r = await lerRetrato(DB);

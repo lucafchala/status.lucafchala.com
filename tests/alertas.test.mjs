@@ -403,4 +403,13 @@ describe('o que os endpoints públicos contam', () => {
     assert.equal(cfg.status, 'degraded');
     assert.doesNotMatch(cfg.detail, /RESEND|KV|NOTIFY|inscrit/i);
   });
+  test('sem os segredos, nenhuma linha pública nomeia binding ou segredo (ST-10)', async () => {
+    const quota = await import('../functions/api/quota-stats.js');
+    const trends = await import('../functions/api/latency-trends.js');
+    const hist = await import('../functions/api/status-history.js');
+    const pedir = async (m) => JSON.stringify(await (await m.onRequestGet({ request: new Request(`${ORIGIN}/x`), env: {}, waitUntil() {} })).json());
+    for (const m of [quota, trends, hist]) {
+      assert.doesNotMatch(await pedir(m), /CF_API_TOKEN|CF_ACCOUNT_ID|STATUS_KV|STATUS_DB|RESEND_API_KEY/);
+    }
+  });
 });

@@ -269,8 +269,10 @@ async function collectCerts(token, accountTag) {
       // certificado tivesse problema. Desconhecido aparece como desconhecido,
       // com o motivo — nem verde por omissão, nem alarme inventado.
       if (!packs?.success) {
-        const why = packs?.errors?.[0]?.message || 'resposta inesperada da API';
-        return { zone: z.name, status: 'unknown', detail: `não verificado (${why})` };
+        // O texto cru da API da Cloudflare fica no log; a linha pública (este
+        // retorno chega ao /api/painel) diz só a causa, como motivo() faz.
+        console.error(`quota-stats: certificados de ${z.name}:`, packs?.errors);
+        return { zone: z.name, status: 'unknown', detail: `não verificado (${porque(new Error(String(packs?.errors?.[0]?.message || '')))})` };
       }
 
       const active = (packs.result || []).filter(p => p.status === 'active');
@@ -293,7 +295,8 @@ async function collectCerts(token, accountTag) {
       if (days < CERT_WARN_DAYS)   return { zone: z.name, status: 'degraded', detail: `expira em ${days}d (renovação travada?)`, days };
       return { zone: z.name, status: 'up', detail: `válido +${days}d`, days };
     } catch (e) {
-      return { zone: z.name, status: 'unknown', detail: `não verificado (${e.message})` };
+      console.error(`quota-stats: certificados de ${z.name}:`, e);
+      return { zone: z.name, status: 'unknown', detail: `não verificado (${porque(e)})` };
     }
   }));
   return out;
@@ -332,11 +335,14 @@ function buildQuotas(usage) {
 // Usada também pelo /api/painel. Devolve o objeto, não a Response.
 function motivo(rotulo, e) {
   console.error(`quota-stats: ${rotulo}:`, e);
+  return `${rotulo}: ${porque(e)}`;
+}
+
+function porque(e) {
   const m = String(e && e.message || '');
-  const why = /unauthori|permission|forbidden|authentication|\b40[13]\b/i.test(m) ? 'sem permissão no token'
+  return /unauthori|permission|forbidden|authentication|\b40[13]\b/i.test(m) ? 'sem permissão no token'
     : /timeout|timed out|abort/i.test(m) ? 'tempo esgotado'
     : 'a API não respondeu';
-  return `${rotulo}: ${why}`;
 }
 
 export async function lerCotas(context) {
@@ -349,7 +355,7 @@ export async function lerCotas(context) {
       configured: false,
       // Spelled out so the panel can tell the operator exactly what to add
       // rather than just disappearing.
-      detail: 'CF_API_TOKEN e CF_ACCOUNT_ID ausentes — cotas e certificados não monitorados',
+      detail: 'monitoramento de cotas não configurado — cotas e certificados não monitorados',
       checkedAt: new Date().toISOString(),
     };
   }
