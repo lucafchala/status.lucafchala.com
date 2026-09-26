@@ -144,6 +144,25 @@ describe('/api/status com STATUS_DB', () => {
     assert.equal(varreduras, 1);
   });
 
+  test('o pedido do agendador fica marcado mesmo quando outro está com a vez (ST-9)', async () => {
+    const DB = d1Sqlite();
+    await pedir(PAGINA + '?varrer=1', { STATUS_DB: DB, STATUS_KV: fakeKV() });   // alguém pega a trava
+    clock += 60_000;
+    fetches = [];
+    await pedir(PAGINA + '?source=cloudflare-cron', { STATUS_DB: DB, STATUS_KV: fakeKV() });
+    assert.equal(sondas().length, 0, 'sem a vez, o agendador não varre');
+    assert.equal(await retrato.ultimaDoAgendador(DB), clock, 'mas o pedido dele fica registrado');
+  });
+
+  test('agendador morto há mais de 48 h continua morto, não "nunca implantado" (ST-5)', async () => {
+    const DB = d1Sqlite();
+    await pedir(PAGINA + '?source=cloudflare-cron', { STATUS_DB: DB, STATUS_KV: fakeKV() });
+    const ultimo = clock;
+    clock += 3 * 24 * 3600_000;                                                 // 3 dias sem o agendador
+    for (let i = 0; i < 3; i++) { await pedir(PAGINA + '?varrer=' + i, { STATUS_DB: DB, STATUS_KV: fakeKV() }); clock += 5 * 60_000; }
+    assert.equal(await retrato.ultimaDoAgendador(DB), ultimo);
+  });
+
   test('a trava é atômica: dois pedidos no mesmo instante, uma vez só', async () => {
     const DB = d1Sqlite();
     const agora = Date.now();

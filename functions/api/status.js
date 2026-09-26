@@ -14,7 +14,7 @@
 // this writer and that reader can never drift apart.
 import { HISTORY_KEY, readHistory, trimHistory } from './status-history.js';
 import { LATENCY_KEY, readLatency, trimLatency, shouldSample, buildSample } from './latency-trends.js';
-import { lerRetrato, tomarVez, gravarVarredura, RETRATO_TTL_MS } from './retrato.js';
+import { lerRetrato, tomarVez, gravarVarredura, marcarAgendador, RETRATO_TTL_MS } from './retrato.js';
 
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
@@ -214,7 +214,7 @@ function checkDados(labelJson, labelFrescor, url, validate, opts) {
 // minutes, which is the opposite of what a monitor should do.
 async function checkResend(label, env) {
   const key = env?.RESEND_API_KEY;
-  if (!key) return { label, status: 'degraded', detail: 'RESEND_API_KEY ausente (sem alertas)' };
+  if (!key) return { label, status: 'degraded', detail: 'chave de envio não configurada (sem alertas)' };
 
   const from = env.NOTIFY_FROM || 'status@lucafchala.com';
   const domain = from.split('@')[1] || '';
@@ -241,7 +241,11 @@ async function checkResend(label, env) {
     if (rt > RESEND_BUDGET_MS)       return { label, status: 'degraded', detail: `API lenta (${rt}ms)` };
     return { label, status: 'up', detail: `${domain} verificado · ${rt}ms` };
   } catch (e) {
-    return { label, status: 'down', detail: netDetail(e) };
+    // Não alcançar a API da Resend daqui não prova que o status caiu nem que
+    // os alertas deixaram de sair: a Resend tem a própria linha em terceiros.
+    // Como `down`, um soluço de rede virava CRÍTICO "Status" para todo inscrito.
+    // `down` fica para o que é certeza: a chave recusada (401/403).
+    return { label, status: 'degraded', detail: netDetail(e) };
   }
 }
 
@@ -879,8 +883,9 @@ export function origemDoPedido(url) {
   return null;
 }
 
-// O payload é público de propósito: o painel (dash) e a home leem os pontos de
-// status direto do navegador.
+// O payload é público de propósito. O CORS fica por um tempo só pelo dash de
+// antes do dash#34, que lia daqui; a home (desde o #52) e o dash novo leem o
+// /api/resumo, que nunca varre.
 const CORS = { 'Access-Control-Allow-Origin': '*' };
 
 function responder(payload, extra = {}) {
@@ -910,6 +915,11 @@ async function comRetrato(context, DB) {
   const r = await lerRetrato(DB);
   const idadeMs = r ? agora - r.em : null;
   const atrasado = idadeMs == null || idadeMs > RETRATO_TTL_MS;
+  // Antes da trava, e com ou sem a vez: o que o vigia precisa saber é que o
+  // agendador está vivo e pedindo, não se ganhou a vez desta vez.
+  if (pedido === 'agendador') {
+    context.waitUntil(marcarAgendador(DB, agora).catch((e) => console.error('retrato: marca do agendador falhou', e)));
+  }
 
   if ((pedido || atrasado) && await tomarVez(DB, agora)) {
     const payload = await varrer(context.env, r ? r.payload : null);
@@ -1202,16 +1212,11 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
   // Envio que falhou na varredura anterior. last_status já avançou, então sem
   // esta fila a transição nunca mais seria detectada e o aviso se perderia.
   // Só volta a tentar o que ainda é verdade agora.
-  const pending = (await readPending(KV))
-    .filter((c) => current[c.name] && current[c.name].status === c.to && !transitions.some((t) => t.name === c.name));
-
-  const candidates = [];
-  for (const t of transitions) {
-    if (SEVERITY_RANK[t.severity] < floor) continue;
-    // O cooldown é por serviço E destino: repetir "caiu" dentro da hora é
-    // ruído, mas a recuperação (ou a piora de degradado para fora do ar) é
-    // notícia nova e sempre passa.
-    const key = cooldownKey(t.name, t.to);
+  // O cooldown é por serviço E destino: repetir "caiu" dentro da hora é
+  // ruído, mas a recuperação (ou a piora de degradado para fora do ar) é
+  // notícia nova e sempre passa.
+  const emCooldown = async (name, to) => {
+    const key = cooldownKey(name, to);
     // KV is eventually consistent, so two colos sweeping at once can rarely
     // double-send; the cooldown still bounds it to ~1 extra email per hour.
     let onCooldown = false;
@@ -1223,12 +1228,34 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
       const last = _fallback.notifiedAt.get(key);
       if (last && now - last < NOTIFY_COOLDOWN_S * 1000) onCooldown = true;
     }
-    if (onCooldown) continue;
+    return onCooldown;
+  };
+
+  // A fila crua fica guardada à parte: um item que deixou de ser verdade (o
+  // serviço voltou) sai do envio, e a fila tem de ser limpa mesmo assim. Antes
+  // ela só era limpa quando sobrava algo para enviar; o item velho sobrevivia
+  // (TTL de 6 h), voltava a casar na queda seguinte e mandava um segundo
+  // CRÍTICO a todo inscrito. Item da fila também respeita o cooldown.
+  const fila = await readPending(KV);
+  const pending = [];
+  for (const c of fila) {
+    if (!current[c.name] || current[c.name].status !== c.to || transitions.some((t) => t.name === c.name)) continue;
+    if (await emCooldown(c.name, c.to)) continue;
+    pending.push(c);
+  }
+
+  const candidates = [];
+  for (const t of transitions) {
+    if (SEVERITY_RANK[t.severity] < floor) continue;
+    if (await emCooldown(t.name, t.to)) continue;
     const s = current[t.name];
     candidates.push({ ...t, url: s ? s.url : '', ownerOnly: isOwnerOnlyName(t.name), attempts: 0 });
   }
   const changes = [...candidates, ...pending];
-  if (changes.length === 0) return;
+  if (changes.length === 0) {
+    if (fila.length) await writePending(KV, []);
+    return;
+  }
 
   let ok = false;
   try { ok = await sendAlerts(env, changes); }
@@ -1246,7 +1273,7 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
       // quando a gravação falhou.
       _fallback.notifiedAt.set(key, now);
     }
-    if (pending.length) await writePending(KV, []);
+    if (fila.length) await writePending(KV, []);
     return;
   }
   // Falhou: o cooldown não foi gasto, e a transição fica na fila para a

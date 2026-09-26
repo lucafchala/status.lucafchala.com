@@ -86,9 +86,9 @@ export async function vigiar({ fetchImpl = fetch, base = BASE, runId = '', esper
     return varrer('agendador da Cloudflare não implantado: o cron do GitHub é o agendador');
   }
   if (ag.idadeMs > LIMITE_MS) {
-    return varrer(`AGENDADOR PARADO: a última varredura dele foi há ${min(ag.idadeMs)} (limite ${min(LIMITE_MS)}). Ver Workers & Pages → status-agendador → Logs / Cron Events`, true);
+    return varrer(`AGENDADOR PARADO: o último pedido dele foi há ${min(ag.idadeMs)} (limite ${min(LIMITE_MS)}). Ver Workers & Pages → status-agendador → Logs / Cron Events`, true);
   }
-  return { acao: 'nada', falha: false, mensagem: `agendador em dia: última varredura há ${min(ag.idadeMs)}` };
+  return { acao: 'nada', falha: false, mensagem: `agendador em dia: último pedido há ${min(ag.idadeMs)}` };
 }
 
 // Execução no Actions.

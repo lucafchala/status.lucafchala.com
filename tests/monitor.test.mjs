@@ -178,7 +178,8 @@ describe('certificado que o token não consegue ler', () => {
     });
     const body = await res.json();
     assert.equal(body.certs[0].status, 'unknown');
-    assert.match(body.certs[0].detail, /Unauthorized/);
+    assert.match(body.certs[0].detail, /não verificado \(sem permissão no token\)/);
+    assert.doesNotMatch(body.certs[0].detail, /Unauthorized/, "o texto cru da API fica no log");
     assert.notEqual(body.status, 'degraded', 'o painel inteiro não pode ficar amarelo por um dado não lido');
   });
 

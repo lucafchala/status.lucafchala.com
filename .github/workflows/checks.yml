@@ -77,3 +77,15 @@ jobs:
               }
             })();
           ' $(find functions -name "*.js")
+
+      # RFC 9116: Expires é obrigatório e deve ficar a menos de um ano. O
+      # schedule semanal acima transforma "renovar antes de vencer" em CI
+      # vermelha, como já acontece no lucafchala.com e no proof.
+      - name: security.txt Expires between 30 days and 1 year from now
+        run: |
+          exp=$(sed -n 's/^Expires: *//p' .well-known/security.txt)
+          [ -n "$exp" ] || { echo "security.txt has no Expires"; exit 1; }
+          left=$(( ( $(date -d "$exp" +%s) - $(date +%s) ) / 86400 ))
+          echo "Expires $exp ($left days left)"
+          [ "$left" -ge 30 ] || { echo "Renew .well-known/security.txt here, in lucafchala.com and in proof.lucafchala.com (same Expires): set Expires to ~11 months ahead"; exit 1; }
+          [ "$left" -le 366 ] || { echo "Expires is more than a year out (RFC 9116 recommends less)"; exit 1; }

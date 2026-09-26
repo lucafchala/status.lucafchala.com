@@ -83,7 +83,7 @@ async function semRetrato(KV, historico) {
   return {
     status: null,
     latencia: await resumoLatencia(KV),
-    barras: KV ? barrasHorarias(linha) : { erro: 'STATUS_KV ausente — sem histórico para desenhar' },
+    barras: KV ? barrasHorarias(linha) : { erro: 'armazenamento não configurado — sem histórico para desenhar' },
     uptime: KV ? {
       fonte: 'transicoes',
       h24: uptimeTransicoes(linha, agora - 24 * 3600_000),

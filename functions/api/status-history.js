@@ -178,7 +178,7 @@ export async function resumoHistorico(KV) {
   if (!KV) {
     return {
       available: false,
-      detail: 'STATUS_KV ausente — histórico não é registrado',
+      detail: 'armazenamento não configurado — histórico não é registrado',
       entries: [], services: {}, checkedAt: new Date().toISOString(),
     };
   }
