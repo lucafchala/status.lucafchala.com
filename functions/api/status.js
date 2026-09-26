@@ -883,8 +883,9 @@ export function origemDoPedido(url) {
   return null;
 }
 
-// O payload é público de propósito: o painel (dash) e a home leem os pontos de
-// status direto do navegador.
+// O payload é público de propósito. O CORS fica por um tempo só pelo dash de
+// antes do dash#34, que lia daqui; a home (desde o #52) e o dash novo leem o
+// /api/resumo, que nunca varre.
 const CORS = { 'Access-Control-Allow-Origin': '*' };
 
 function responder(payload, extra = {}) {
