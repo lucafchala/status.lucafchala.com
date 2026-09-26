@@ -241,7 +241,11 @@ async function checkResend(label, env) {
     if (rt > RESEND_BUDGET_MS)       return { label, status: 'degraded', detail: `API lenta (${rt}ms)` };
     return { label, status: 'up', detail: `${domain} verificado · ${rt}ms` };
   } catch (e) {
-    return { label, status: 'down', detail: netDetail(e) };
+    // Não alcançar a API da Resend daqui não prova que o status caiu nem que
+    // os alertas deixaram de sair: a Resend tem a própria linha em terceiros.
+    // Como `down`, um soluço de rede virava CRÍTICO "Status" para todo inscrito.
+    // `down` fica para o que é certeza: a chave recusada (401/403).
+    return { label, status: 'degraded', detail: netDetail(e) };
   }
 }
 
