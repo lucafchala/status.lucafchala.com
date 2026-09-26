@@ -1149,6 +1149,11 @@ async function doSubscribe() {
       mostra('sub-form', false);
       mostra('sub-consent', false);
       mostra('sub-done', true);
+      // O campo que tinha o foco acabou de sumir: sem isto o foco caía no
+      // <body>, o leitor de tela perdia o lugar e o Esc do painel parava.
+      const feito = document.getElementById('sub-done');
+      feito.tabIndex = -1;
+      feito.focus();
     } else {
       // A mensagem do servidor é em português; em inglês, a genérica.
       showSubError(lang === 'pt' ? data.error : t('sub_error'));
@@ -1193,7 +1198,9 @@ document.getElementById('sub-form').addEventListener('submit', (ev) => {
   ev.preventDefault();
   doSubscribe();
 });
-document.getElementById('sub-email').addEventListener('keydown', (ev) => {
+// No painel inteiro, não só no campo: depois de enviar, o foco está na
+// mensagem de confirmação, e o Esc tem de continuar fechando.
+document.getElementById('inscricao').addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') hideSubscribe();
 });
 
