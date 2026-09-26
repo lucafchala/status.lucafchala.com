@@ -88,6 +88,23 @@ describe('envio', () => {
     assert.equal(m.lotes[0][0].to[0], 'dono@x.co');
   });
 
+  test('item da fila que deixou de ser verdade é limpo, não ressuscita na queda seguinte (ST-3)', async () => {
+    // Serviço que nenhum outro teste usa: o cooldown de reserva vive no módulo.
+    const kv = fakeKV({ last_status: JSON.stringify({ Treino: 'up' }) });
+    let recusa = true;
+    const m = mundo({ resend: () => (recusa ? new Response('', { status: 500 }) : new Response('{}')) });
+    await status.detectAndNotify(ENV(kv), [svc('Treino', 'down')], ORIGIN);   // envio falha: fila [Treino down]
+    recusa = false; clock += 10 * 60_000;
+    await status.detectAndNotify(ENV(kv), [svc('Treino', 'up')], ORIGIN);     // recuperação enviada
+    assert.equal(kv._store.has('alert_pending'), false, 'a fila velha sai junto');
+    clock += 10 * 60_000;
+    await status.detectAndNotify(ENV(kv), [svc('Treino', 'down')], ORIGIN);   // caiu de novo: um CRÍTICO
+    clock += 10 * 60_000;
+    await status.detectAndNotify(ENV(kv), [svc('Treino', 'down')], ORIGIN);   // nada mudou: nada sai
+    const assuntos = m.lotes.map((l) => l[0].subject);
+    assert.equal(assuntos.slice(1).filter((s) => /CRÍTICO/.test(s)).length, 1, assuntos.join(' | '));
+  });
+
   test('envio recusado não gasta o cooldown, e a próxima varredura tenta de novo', async () => {
     const kv = fakeKV({ last_status: JSON.stringify({ Proof: 'up' }) });
     let recusa = true;
