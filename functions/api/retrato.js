@@ -260,13 +260,26 @@ export function barrasDiarias(porDia, agora = Date.now()) {
   return { tipo: 'diario', fonte: 'd1', periodos, servicos };
 }
 
-// Última varredura feita pelo agendador da Cloudflare (origem 'agendador'),
-// dentro da janela guardada. Usa o índice por `em`; lê no máximo as linhas
-// da janela (≤ 288 com o agendador de 10 min).
+// O último PEDIDO do agendador, guardado em `marca` — fora da poda de 48 h
+// da `varredura` e gravado mesmo quando outro pedido estava com a vez. Só com
+// as linhas da `varredura`, um agendador morto havia mais de 48 h virava
+// "nunca implantado" para o vigia (alarme verde de novo), e quem segurasse a
+// trava com `?varrer` fazia um agendador vivo parecer parado. Uma linha
+// escrita por tique (144/dia) no D1, que tem folga para isso.
+export async function marcarAgendador(DB, agora = Date.now()) {
+  await garantirEsquema(DB);
+  await DB.prepare(`INSERT INTO marca (nome, valor) VALUES ('agendador', ?)
+                    ON CONFLICT (nome) DO UPDATE SET valor = excluded.valor`).bind(agora).run();
+}
+
+// Quando o agendador deu sinal pela última vez: a marca, ou — num banco de
+// antes da marca existir — a última varredura dele na janela guardada.
 export async function ultimaDoAgendador(DB) {
   await garantirEsquema(DB);
-  const row = await DB.prepare("SELECT MAX(em) AS em FROM varredura WHERE origem = 'agendador'").first();
-  return row && row.em != null ? Number(row.em) : null;
+  const m = await DB.prepare("SELECT valor AS em FROM marca WHERE nome = 'agendador'").first();
+  const v = await DB.prepare("SELECT MAX(em) AS em FROM varredura WHERE origem = 'agendador'").first();
+  const ems = [m, v].map((r) => (r && r.em != null ? Number(r.em) : null)).filter((x) => x != null);
+  return ems.length ? Math.max(...ems) : null;
 }
 
 // /api/retrato — só a idade do retrato. É o que um vigia de fora (o cron do
@@ -292,7 +305,7 @@ export async function onRequestGet(context) {
       ttlMs: RETRATO_TTL_MS,
       // O vigia (monitor.yml) precisa separar "o agendador parou" de "o
       // agendador nunca existiu" (Worker ainda não implantado): só o primeiro
-      // é alarme. Sem varredura dele na janela de 48 h, `ultimaEm` é null.
+      // é alarme. `ultimaEm` só é null se o agendador nunca pediu nada.
       agendador: {
         ultimaEm: ag ? new Date(ag).toISOString() : null,
         idadeMs: ag ? agora - ag : null,

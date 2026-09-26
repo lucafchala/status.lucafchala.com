@@ -14,7 +14,7 @@
 // this writer and that reader can never drift apart.
 import { HISTORY_KEY, readHistory, trimHistory } from './status-history.js';
 import { LATENCY_KEY, readLatency, trimLatency, shouldSample, buildSample } from './latency-trends.js';
-import { lerRetrato, tomarVez, gravarVarredura, RETRATO_TTL_MS } from './retrato.js';
+import { lerRetrato, tomarVez, gravarVarredura, marcarAgendador, RETRATO_TTL_MS } from './retrato.js';
 
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
@@ -910,6 +910,11 @@ async function comRetrato(context, DB) {
   const r = await lerRetrato(DB);
   const idadeMs = r ? agora - r.em : null;
   const atrasado = idadeMs == null || idadeMs > RETRATO_TTL_MS;
+  // Antes da trava, e com ou sem a vez: o que o vigia precisa saber é que o
+  // agendador está vivo e pedindo, não se ganhou a vez desta vez.
+  if (pedido === 'agendador') {
+    context.waitUntil(marcarAgendador(DB, agora).catch((e) => console.error('retrato: marca do agendador falhou', e)));
+  }
 
   if ((pedido || atrasado) && await tomarVez(DB, agora)) {
     const payload = await varrer(context.env, r ? r.payload : null);
