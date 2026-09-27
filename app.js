@@ -21,8 +21,11 @@ const SERVICES = [
   { name: 'RG',                  url: 'https://rg.lucafchala.com',              group: 'apps' },
   { name: 'Pays',                url: 'https://pays.lucafchala.com',            group: 'apps' },
   { name: 'Treino',              url: 'https://treino.lucafchala.com',          group: 'apps' },
+  // Sem URL: a página não mostra nenhum endereço do homelab, só o nome e o
+  // estado que o vigia dele (homelab-watchdog) mediu.
+  { name: 'Homelab',             url: '',                                       group: 'infra' },
 ];
-const GRUPOS = ['principal', 'apps'];
+const GRUPOS = ['principal', 'apps', 'infra'];
 
 const THIRD_PARTY = [
   { name: 'GitHub',       page: 'https://www.githubstatus.com' },
@@ -40,7 +43,8 @@ const THIRD_PARTY = [
 // com todo o ecossistema (ver tema.js).
 const S = {
   pt: {
-    g_principal: 'Principais', g_apps: 'Aplicativos',
+    g_principal: 'Principais', g_apps: 'Aplicativos', g_infra: 'Infraestrutura',
+    up_for: (x) => `no ar há ${x}`, down_for: (x) => `fora do ar há ${x}`,
     st_up: 'operacional', st_degraded: 'degradado', st_down: 'fora do ar', st_unknown: 'sem dados', st_checking: 'verificando',
     hist_loading: (n) => `histórico de ${n} ainda não carregado`,
     checks_of: (n) => `verificações de ${n}`,
@@ -48,6 +52,7 @@ const S = {
     ok: 'ok',
     n_problems: (n) => `${n} problema${n > 1 ? 's' : ''}`,
     n_checks_ok: (n) => `${n} verificaç${n > 1 ? 'ões' : 'ão'} ok`,
+    n_no_data: (n) => `${n} sem dados`,
     ago: (x) => `há ${x}`,
     was: (st, quando, dur) => `esteve ${st} ${quando} · durou ${dur}`,
     version: 'versão',
@@ -103,7 +108,8 @@ const S = {
     sub_captcha: 'Complete a verificação anti-robô.',
   },
   en: {
-    g_principal: 'Main', g_apps: 'Apps',
+    g_principal: 'Main', g_apps: 'Apps', g_infra: 'Infrastructure',
+    up_for: (x) => `up for ${x}`, down_for: (x) => `down for ${x}`,
     st_up: 'operational', st_degraded: 'degraded', st_down: 'down', st_unknown: 'no data', st_checking: 'checking',
     hist_loading: (n) => `${n} history not loaded yet`,
     checks_of: (n) => `${n} checks`,
@@ -111,6 +117,7 @@ const S = {
     ok: 'ok',
     n_problems: (n) => `${n} problem${n > 1 ? 's' : ''}`,
     n_checks_ok: (n) => `${n} check${n > 1 ? 's' : ''} ok`,
+    n_no_data: (n) => `${n} with no data`,
     ago: (x) => `${x} ago`,
     was: (st, quando, dur) => `was ${st} ${quando} · lasted ${dur}`,
     version: 'version',
@@ -343,6 +350,34 @@ function fmtDur(ms) {
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 
+// "Há quanto tempo neste estado" pode passar de dias (um homelab estável fica
+// semanas no ar); fmtDur diria "600 h".
+function fmtDurLonga(ms) {
+  if (ms == null || ms < 0) return '';
+  const min = Math.floor(ms / 60000);
+  if (min < 60) return Math.max(1, min) + ' min';
+  const h = Math.floor(min / 60);
+  if (h < 24) return min % 60 ? `${h} h ${min % 60} min` : `${h} h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d} d ${h % 24} h` : `${d} d`;
+}
+
+// Hora de Brasília, qualquer que seja o fuso de quem abriu a página: o
+// homelab está em São Paulo, e "desde 11:42" tem de ser a hora de lá.
+const FMT_SP = { timeZone: 'America/Sao_Paulo', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' };
+function horaSP(ms) { return new Date(ms).toLocaleString(locale(), FMT_SP).replace('.', ''); }
+
+// "no ar há 3 h 12 min · desde 27 set, 11:42" — só para serviço medido por
+// vigia (hoje o Homelab), que manda `desde`. Sem dados, nada: o selo cinza
+// já diz tudo, e um "há quanto tempo" de um estado desconhecido não existe.
+function tempoNoEstado(result) {
+  const em = result && result.desde ? Date.parse(result.desde) : NaN;
+  if (!Number.isFinite(em) || (result.status !== 'up' && result.status !== 'down')) return '';
+  const dur = fmtDurLonga(Math.max(0, Date.now() - em));
+  return `${esc(t(result.status === 'up' ? 'up_for' : 'down_for', dur))} · ${esc(t('since'))} ` +
+    `<time datetime="${new Date(em).toISOString()}" title="${esc(horaSP(em))} (America/Sao_Paulo)">${esc(horaSP(em))}</time>`;
+}
+
 function fmtPct(p) {
   if (p == null || !Number.isFinite(p)) return '—';
   const v = p === 100 ? '100' : p.toFixed(p >= 99.95 ? 3 : 2);
@@ -381,8 +416,8 @@ function renderSkeletons() {
         <li class="componente" id="svc-${i}">
           <div class="comp-linha">
             <div class="comp-nome">
-              <a href="${esc(svc.url)}" target="_blank" rel="noopener">${esc(svc.name)}</a>
-              <span class="comp-url">${esc(svc.url.replace('https://', ''))}</span>
+              ${svc.url ? `<a href="${esc(svc.url)}" target="_blank" rel="noopener">${esc(svc.name)}</a>
+              <span class="comp-url">${esc(svc.url.replace('https://', ''))}</span>` : `<span class="comp-nome-txt">${esc(svc.name)}</span>`}
             </div>
             <span class="estado checking" id="lbl-${i}"><span class="estado-ic" aria-hidden="true">…</span><span>${esc(t('st_checking'))}</span></span>
           </div>
@@ -431,7 +466,10 @@ function updateServiceRow(i, result) {
   pintarEstado(document.getElementById(`lbl-${i}`), result.status);
   const rt = document.getElementById(`rt-${i}`);
   const code = document.getElementById(`code-${i}`);
-  if (rt) rt.textContent = rtLabel(result.rt, result.status);
+  if (rt) {
+    if (result.desde) rt.innerHTML = tempoNoEstado(result);
+    else rt.textContent = rtLabel(result.rt, result.status);
+  }
   if (code) code.textContent = codeLabel(result.statusCode);
   renderChecks(i, result);
 }
@@ -459,13 +497,17 @@ function renderChecks(i, result) {
     </li>`;
   }).join('');
 
-  const problems = checks.filter(c => c.status !== 'up').length;
+  // Sem dados não é problema: não fica vermelho nem abre sozinho (o selo
+  // cinza já diz; o porquê está a um clique).
+  const problems = checks.filter(c => c.status === 'down' || c.status === 'degraded').length;
+  const semDados = checks.filter(c => c.status === 'unknown').length;
   toggle.hidden = false;
   toggle.classList.toggle('has-problems', problems > 0);
   const aberto = problems > 0 || panel.classList.contains('show');
   panel.classList.toggle('show', aberto);
   toggle.setAttribute('aria-expanded', aberto ? 'true' : 'false');
-  toggle.dataset.rotulo = problems > 0 ? t('n_problems', problems) : t('n_checks_ok', checks.length);
+  toggle.dataset.rotulo = problems > 0 ? t('n_problems', problems)
+    : semDados > 0 ? t('n_no_data', semDados) : t('n_checks_ok', checks.length);
   toggle.textContent = `${aberto ? '▾' : '▸'} ${toggle.dataset.rotulo}`;
 }
 
@@ -620,7 +662,8 @@ function updateBanner(results) {
   let estado, titulo, detalhe;
   if (!ruins.length) {
     estado = 'up'; titulo = t('all_up');
-    detalhe = t('n_checked', results.length);
+    // Quem está sem dados (o vigia do Homelab mudo) não foi verificado.
+    detalhe = t('n_checked', results.filter(r => r.status !== 'unknown').length);
   } else if (ruins.length === results.length) {
     estado = 'down'; titulo = t('all_down');
     detalhe = t('all_down_sub');
@@ -658,6 +701,12 @@ function anunciar(texto) {
 
 // Idade do dado, não hora do pedido. Atualizado a cada 30 s, sem rede.
 function updateLastChecked() {
+  // O "no ar há X" anda com o relógio, não com a rede.
+  resultados.forEach((r) => {
+    if (!r.desde) return;
+    const el = document.getElementById(`rt-${SERVICES.findIndex(s => s.name === r.name)}`);
+    if (el) el.innerHTML = tempoNoEstado(r);
+  });
   const el = document.getElementById('last-checked');
   if (!el) return;
   const agora = Date.now();

@@ -29,6 +29,7 @@ The ecosystem's status page: a static page plus Cloudflare Pages Functions that 
   - `cota ·` / `TLS ·` rows go only to `NOTIFY_TO`;
   - never let a client request shape an email.
 - **Public endpoints don't leak internals.** No binding names or subscriber counts in `/api/status`, `/api/healthz` (detail only with `X-Status-Token` = `STATUS_ADMIN_TOKEN`) or `/api/subscribe` errors. Raw upstream errors go to `console.error`.
+- **Homelab is read, not probed.** Its state comes from the `homelab-watchdog` Worker (`HOMELAB_STATUS_URL`, `lerVigiaHomelab`). Never probe the tunnel from here, and never show any homelab address (the row has `url: ''`). Watchdog unreachable → `unknown`, never `down`.
 - **Unknown is not up.** Anything unread (a third-party page that 403s, a quota dataset that failed, a cert the token can't see) is `unknown`, not green and not red.
 - **Other sites read `/api/resumo`, never `/api/painel` or `/api/status`.** `/api/status` can sweep; the painel is heavy. Anything cross-origin must stay read-only, small, cached and CORS-open.
 - **GET never mutates.** Confirm and unsubscribe show a button on GET; the POST acts.

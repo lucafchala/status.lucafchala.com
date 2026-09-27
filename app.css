@@ -199,7 +199,7 @@ a:hover { color: var(--accent-forte); }
 
 .comp-linha { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .comp-nome { min-width: 0; }
-.comp-nome a {
+.comp-nome a, .comp-nome-txt {
   font-family: 'Cormorant Garamond', Georgia, serif; font-size: 18px; font-weight: 600;
   color: var(--text); text-decoration: none;
 }

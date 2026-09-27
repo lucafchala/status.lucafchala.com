@@ -628,6 +628,51 @@ export function dominioOuWorker(label, primary, h) {
   return { label, status: 'degraded', detail: `domínio próprio ${code ? `HTTP ${code}` : 'sem resposta'}, o Worker responde pelo workers.dev: rota, DNS ou TLS da zona` };
 }
 
+// Homelab: um notebook em casa atrás de um Cloudflare Tunnel. NÃO é sondado
+// daqui. Quem mede é o homelab-watchdog, um Worker com cron próprio de 5 min
+// na Cloudflare, que só declara `down` depois de 3 falhas seguidas; esta
+// varredura lê o veredito dele. Sondar o túnel direto duplicaria a medida com
+// um critério pior (uma tentativa, sem histerese) e poria o endereço do
+// homelab no payload público.
+//
+// O endereço do vigia vem do ambiente (HOMELAB_STATUS_URL) e não sai daqui:
+// nem no payload, nem no detalhe da linha, nem no e-mail.
+//
+// Vigia que não responde, responde erro ou responde algo fora do contrato é
+// `unknown` ("sem dados"), nunca `down`: não alcançar o vigia não diz nada
+// sobre o notebook.
+export const HOMELAB_TIMEOUT_MS = 5000;
+const HOMELAB_ESTADOS = new Set(['up', 'down', 'unknown']);
+export async function lerVigiaHomelab(env) {
+  const url = env && env.HOMELAB_STATUS_URL;
+  const semDados = (detail) => ({ status: 'unknown', detail, desde: null });
+  if (!url) return semDados('vigia não configurado');
+  let res;
+  try {
+    res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(HOMELAB_TIMEOUT_MS) });
+  } catch (e) {
+    console.error('homelab: vigia sem resposta', e);
+    return semDados('vigia sem resposta');
+  }
+  if (!res.ok) {
+    res.body?.cancel();
+    console.error('homelab: vigia respondeu HTTP', res.status);
+    return semDados('vigia sem resposta');
+  }
+  let j;
+  try { j = await res.json(); } catch { j = null; }
+  if (!j || typeof j !== 'object' || !HOMELAB_ESTADOS.has(j.status)) {
+    console.error('homelab: resposta do vigia fora do contrato');
+    return semDados('resposta do vigia inválida');
+  }
+  if (j.status === 'unknown') return semDados('o vigia ainda não mediu');
+  // `since` inválido não derruba o estado, só some o "há quanto tempo". Uma
+  // data no futuro (relógio torto) também: "há -3 min" é pior que nada.
+  const em = typeof j.since === 'string' ? Date.parse(j.since) : NaN;
+  const desde = Number.isFinite(em) && em <= Date.now() + 60_000 ? new Date(em).toISOString() : null;
+  return { status: j.status, detail: j.status === 'down' ? 'fora do ar segundo o vigia (3 falhas seguidas)' : '', desde };
+}
+
 export const SERVICES = [
   {
     name: 'lucafchala.com', url: 'https://lucafchala.com', marker: 'Luca',
@@ -792,6 +837,12 @@ export const SERVICES = [
       checkResend('entrega de alertas (Resend)', env),
     ],
   },
+  {
+    // Sem URL de propósito: nenhum endereço do homelab aparece na página, no
+    // /api/status ou no e-mail — só o nome e o estado. Sem `marker` e sem
+    // sonda: o estado vem do vigia (ver lerVigiaHomelab).
+    name: 'Homelab', url: '', vigia: lerVigiaHomelab,
+  },
 ];
 
 function configAlertas(label, env) {
@@ -807,7 +858,20 @@ function isolar(p, label = 'verificação') {
   return Promise.resolve(p).catch((e) => { console.error('check lançou', label, e); return { label, ...ERRO_INTERNO }; });
 }
 
+// Serviço medido por outro vigia: uma linha só, sem tempo de resposta (o
+// tempo seria o do vigia, não o do serviço) e com `desde`, que é quando o
+// vigia viu o estado atual começar.
+async function checkVigia(svc, env) {
+  const v = await svc.vigia(env);
+  const check = { label: 'vigia (cron de 5 min)', status: v.status, detail: v.detail };
+  return {
+    name: svc.name, url: svc.url, status: v.status, statusCode: null, rt: null, desde: v.desde,
+    checks: [check], problems: v.status === 'down' && v.detail ? [`${check.label}: ${v.detail}`] : [],
+  };
+}
+
 async function checkService(svc, env, anterior) {
+  if (svc.vigia) return checkVigia(svc, env);
   const primary = await probePrimary(svc.url, svc.marker, svc.degradedMs);
   let lista = [];
   try { lista = svc.checks ? svc.checks(svc.url, env, primary, anterior) : []; }
@@ -866,6 +930,8 @@ export async function varrer(env, anterior = null) {
   const antes = (nome) => (anterior && Array.isArray(anterior.services) ? anterior.services.find((x) => x && x.name === nome) : null) || null;
   const services = await Promise.all(SERVICES.map((s) => checkService(s, env, antes(s.name)).catch((e) => {
     console.error('serviço lançou', s.name, e);
+    // Erro nosso ao ler um vigia não diz nada sobre o serviço: sem dados.
+    if (s.vigia) return { name: s.name, url: s.url, status: 'unknown', statusCode: null, rt: null, desde: null, checks: [{ label: 'vigia (cron de 5 min)', status: 'unknown', detail: 'erro interno na leitura' }], problems: [] };
     return { name: s.name, url: s.url, status: 'degraded', statusCode: null, rt: 0, checks: [{ label: 'disponibilidade', ...ERRO_INTERNO }], problems: [`disponibilidade: ${ERRO_INTERNO.detail}`] };
   })));
   return { services, checkedAt: new Date().toISOString() };
@@ -1107,8 +1173,13 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
 
   // Services and quota rows run through one pipeline from here: same change
   // detection, same severity, same cooldown, same batched e-mail.
+  // `unknown` (hoje só o Homelab, quando o vigia não responde) não é
+  // transição: fica fora da detecção e o último estado conhecido segue em
+  // last_status, como as linhas de cota que a quota-stats não conseguiu ler.
+  // Senão, um vigia mudo viraria "recuperado"/"caiu" por e-mail.
+  const semDados = services.filter((s) => s.status === 'unknown');
   const tracked = [
-    ...services.map((s) => ({
+    ...services.filter((s) => s.status !== 'unknown').map((s) => ({
       name: s.name, status: s.status, url: s.url,
       problems: s.problems, quiesceOnRecovery: false,
     })),
@@ -1128,6 +1199,7 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
   if (quotas === null) {
     for (const [k, v] of Object.entries(prev)) if (isOwnerOnlyName(k) && !(k in next)) next[k] = v;
   }
+  for (const s of semDados) if (s.name in prev) next[s.name] = prev[s.name];
   let changed = false;
   for (const k of Object.keys(next)) { if (prev[k] !== next[k]) { changed = true; break; } }
   if (!changed) {

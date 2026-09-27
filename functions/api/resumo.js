@@ -39,7 +39,9 @@ export async function montarResumo(DB, agora = Date.now()) {
     checkedAt: new Date(r.em).toISOString(),
     atrasado: idadeMs > RETRATO_TTL_MS,
     services: r.payload.services
-      .filter((s) => s && typeof s.name === 'string' && typeof s.url === 'string' && ESTADOS.has(s.status))
+      // Serviço sem URL (o Homelab, que não expõe endereço) fica de fora: as
+      // bolinhas da home são links.
+      .filter((s) => s && typeof s.name === 'string' && typeof s.url === 'string' && s.url && ESTADOS.has(s.status))
       .map((s) => ({ name: s.name, url: s.url, status: s.status })),
   };
 }
