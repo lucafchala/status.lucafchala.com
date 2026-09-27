@@ -124,11 +124,15 @@ export async function lerRetrato(DB) {
 // Uma varredura vira uma linha em `varredura` + uma por serviço em `dia`,
 // num lote só (uma ida ao banco, uma transação). A poda vai junto: o que
 // passou da janela sai na mesma ida, e o custo fica constante.
+const ESTADOS_MEDIDOS = new Set(['up', 'degraded', 'down']);
 export async function gravarVarredura(DB, payload, origem, agora = Date.now()) {
   await garantirEsquema(DB);
   const st = {};
   const rt = {};
   for (const s of payload.services || []) {
+    // `unknown` (vigia do Homelab mudo) não entra na série nem no agregado
+    // diário: o dia contaria a varredura como verde. Sem linha é sem dado.
+    if (!ESTADOS_MEDIDOS.has(s.status)) continue;
     st[s.name] = s.status;
     // Mesma regra de latency-trends.buildSample: um serviço fora do ar tem
     // tempo de resposta que mede o NOSSO timeout, não o serviço.

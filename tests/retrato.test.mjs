@@ -87,7 +87,9 @@ describe('/api/status com STATUS_DB', () => {
     const n = DB.sqlite.prepare('SELECT COUNT(*) AS n FROM varredura').get().n;
     assert.equal(n, 1);
     const dias = DB.sqlite.prepare('SELECT COUNT(*) AS n FROM dia').get().n;
-    assert.equal(dias, status.SERVICES.length, 'uma linha por serviço no agregado diário');
+    // O Homelab, sem HOMELAB_STATUS_URL aqui, fica `unknown`: sem linha no
+    // agregado, que é "sem dado" e não verde.
+    assert.equal(dias, status.SERVICES.filter((s) => !s.vigia).length, 'uma linha por serviço medido no agregado diário');
   });
 
   test('visitante com retrato recente LÊ: zero sonda', async () => {
