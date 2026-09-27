@@ -156,7 +156,7 @@ export async function resumoLatencia(KV) {
   if (!KV) {
     return {
       available: false,
-      detail: 'STATUS_KV ausente — latência não é registrada',
+      detail: 'armazenamento não configurado — latência não é registrada',
       entries: [], services: {}, checkedAt: new Date().toISOString(),
     };
   }

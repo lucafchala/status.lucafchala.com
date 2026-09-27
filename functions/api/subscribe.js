@@ -19,8 +19,21 @@
 //      limite por valor é de 25 MB, e a escrita que o estoura falha inteira:
 //      perde-se a LISTA TODA, não o excedente.
 //
-// Nenhum dos controles abaixo custa I/O: são todos decididos com o que já está
-// na mão (cabeçalho, memória do isolate, ou a leitura que já ia acontecer).
+// Nenhum dos controles abaixo custa escrita de KV: são decididos com o que já
+// está na mão (cabeçalho, memória do isolate, a leitura que já ia acontecer)
+// ou, no teto diário, com uma linha no D1, que tem cem vezes mais folga.
+
+import { contarNoDia } from './retrato.js';
+
+// Teto de e-mails de confirmação por dia (fuso de São Paulo), para o site
+// inteiro. A trava por IP é por isolate e por endereço: um atacante com
+// vários IPs (ou um /64 de IPv6) e endereços distintos passava por ela, e
+// cada tentativa custava uma escrita de KV e um envio pelo Resend. Cinquenta
+// por dia é folga para um público real (é raro ver mais que um punhado de
+// inscrições num dia) e deixa a maior parte da cota diária do Resend para os
+// alertas, que são o motivo de a lista existir. Só vale com STATUS_DB: sem
+// ele, o controle custaria justamente a escrita de KV que protege.
+export const MAX_CONFIRMACOES_DIA = 50;
 
 // Teto da lista. Chegando aqui, inscrição nova é recusada em vez de a escrita
 // falhar mais adiante e levar junto quem já estava inscrito.
@@ -47,6 +60,38 @@ function ipThrottled(ip) {
   recentes.push(agora);
   _hits.set(ip, recentes);
   return false;
+}
+
+// A trava conta por REDE, não por endereço: um provedor entrega um /64
+// inteiro de IPv6 a cada cliente, e contar por /128 dava a ele 2⁶⁴ chaves
+// novas — uma por tentativa. IPv4 (e IPv4 mapeado em IPv6) segue por
+// endereço, que é o que um cliente comum tem.
+export function chaveDoIp(ip) {
+  if (typeof ip !== 'string' || !ip.includes(':')) return ip || 'unknown';
+  const v4 = ip.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (v4) return v4[1];
+  const [cabeca, cauda = ''] = ip.split('%')[0].split('::');
+  const a = cabeca ? cabeca.split(':') : [];
+  const b = cauda ? cauda.split(':') : [];
+  const meio = ip.includes('::') ? Array(Math.max(0, 8 - a.length - b.length)).fill('0') : [];
+  const grupos = [...a, ...meio, ...b].slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16));
+  return `${grupos.join(':')}::/64`;
+}
+
+// Quem é o MESMO destinatário. `ana+x@gmail.com`, `ana+y@gmail.com` e
+// `a.na@googlemail.com` caem na mesma caixa; com a chave pelo endereço
+// literal, cada variação contava como gente nova e ganhava o próprio e-mail
+// de confirmação — a regra "um link por endereço por dia" não segurava nada
+// contra quem quisesse encher uma caixa. A chave junta as variações; o
+// e-mail continua indo para o endereço digitado.
+const PONTOS_NAO_CONTAM = new Set(['gmail.com', 'googlemail.com']);
+export function chaveDoEndereco(email) {
+  const arroba = email.lastIndexOf('@');
+  let local = email.slice(0, arroba);
+  let dominio = email.slice(arroba + 1);
+  local = local.split('+')[0] || local;
+  if (PONTOS_NAO_CONTAM.has(dominio)) { local = local.replace(/\./g, ''); dominio = 'gmail.com'; }
+  return `${local}@${dominio}`;
 }
 
 // Mesma checagem do site de fotos (isCrossSiteRequest, src/security.js), pelo
@@ -77,9 +122,10 @@ function crossSite(request) {
 // manda um link; quem entra na lista é quem abriu a caixa de entrada e clicou
 // (ver confirm.js). É também o que a LGPD pede de um consentimento.
 //
-// A chave do pendente é o hash do endereço, não o token: assim um segundo POST
-// para o mesmo endereço dentro das 24 h não manda outro e-mail — o teto de
-// mensagens por destinatário vale entre isolates, sem escrita extra.
+// A chave do pendente é o hash do DESTINATÁRIO (chaveDoEndereco), não o
+// token: assim um segundo POST para a mesma caixa dentro das 24 h — ainda que
+// com outro `+tag` — não manda outro e-mail. O teto de mensagens por
+// destinatário vale entre isolates, sem escrita extra.
 export const PENDING_TTL_S = 24 * 3600;
 export const pendingKey = (id) => `pending_sub:${id}`;
 
@@ -126,7 +172,7 @@ export async function onRequestPost({ request, env }) {
   if (crossSite(request)) return json({ error: 'Origem não permitida' }, 403);
 
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  if (ipThrottled(ip)) return json({ error: 'Muitas tentativas. Tente mais tarde.' }, 429);
+  if (ipThrottled(chaveDoIp(ip))) return json({ error: 'Muitas tentativas. Tente mais tarde.' }, 429);
 
   let email, turnstile;
   try { ({ email, turnstile } = await request.json()); } catch {
@@ -174,7 +220,8 @@ export async function onRequestPost({ request, env }) {
   try { subs = raw ? JSON.parse(raw) : []; } catch { subs = []; }
   if (!Array.isArray(subs)) subs = [];
 
-  if (subs.some(s => s && s.email === email)) return json(PENDENTE);
+  const chave = chaveDoEndereco(email);
+  if (subs.some(s => s && typeof s.email === 'string' && chaveDoEndereco(s.email) === chave)) return json(PENDENTE);
 
   // O teto é checado depois do "já inscrito": quem já está na lista continua
   // recebendo a resposta idempotente mesmo com a lista cheia.
@@ -183,8 +230,26 @@ export async function onRequestPost({ request, env }) {
     return json({ error: 'Lista de inscrições temporariamente fechada.' }, 503);
   }
 
-  const id = await emailId(email);
+  const id = await emailId(chave);
   if (await KV.get(pendingKey(id))) return json(PENDENTE);
+
+  // Teto diário (ver MAX_CONFIRMACOES_DIA): depois das respostas que não
+  // mandam nada — quem já é inscrito ou pendente não gasta vaga — e antes da
+  // escrita de KV, para a recusa custar zero escrita. D1 que não responde
+  // fecha a porta em vez de abri-la: o teto existe para o dia ruim.
+  if (env.STATUS_DB) {
+    let cabe = false;
+    try {
+      cabe = await contarNoDia(env.STATUS_DB, 'confirmacoes', MAX_CONFIRMACOES_DIA);
+    } catch (e) {
+      console.error('subscribe: teto diário ilegível (D1)', e);
+      return json({ error: 'Serviço de inscrição indisponível no momento.' }, 503);
+    }
+    if (!cabe) {
+      console.error(`subscribe recusado: teto diário de ${MAX_CONFIRMACOES_DIA} confirmações atingido`);
+      return json({ error: 'Muitas inscrições hoje. Tente de novo amanhã.' }, 429);
+    }
+  }
 
   const token = crypto.randomUUID();
   // 1 write

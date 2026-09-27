@@ -134,3 +134,31 @@ describe('contraste AA das cores do painel', () => {
     });
   }
 });
+
+// `t(chave)` é a tradução, e quase toda linha de app.js a chama. Uma variável
+// local chamada `t` (um tempo, uma tendência) esconde a função no escopo
+// dela, e a primeira chamada ali vira "t is not a function" — foi o que deixou
+// "Tempo de resposta" vazio e a página dizendo "sem resposta do servidor" a
+// cada atualização (renderLatency, 2026-09). Nada no servidor pega isso, e o
+// navegador só mostra no console; por isso a regra vira teste.
+describe('app.js: a tradução t() não é sombreada', () => {
+  const js = semComentarios(JS);
+  const temT = (lista) => lista.split(',').some((p) => /^\s*(\.\.\.)?t\s*(=.*)?$/.test(p));
+
+  test('nenhuma declaração const/let/var chamada t', () => {
+    assert.deepEqual(js.match(/\b(?:const|let|var)\s+t\b(?!\w)/g) || [], []);
+  });
+
+  test('nenhum parâmetro chamado t (function, arrow, catch)', () => {
+    const achados = [];
+    for (const m of js.matchAll(/\bfunction\b\s*(\w*)\s*\(([^)]*)\)/g)) if (temT(m[2])) achados.push(m[0]);
+    for (const m of js.matchAll(/\(([^()]*)\)\s*=>/g)) if (temT(m[1])) achados.push(m[0]);
+    for (const m of js.matchAll(/(?<![\w$.])t\s*=>/g)) achados.push(m[0]);
+    for (const m of js.matchAll(/\bcatch\s*\(\s*t\s*\)/g)) achados.push(m[0]);
+    assert.deepEqual(achados, []);
+  });
+
+  test('a própria função t continua existindo, uma vez só', () => {
+    assert.equal((js.match(/\bfunction t\(/g) || []).length, 1);
+  });
+});

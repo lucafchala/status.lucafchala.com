@@ -22,7 +22,10 @@
 //               a série de 48 h não precisar abrir o payload;
 //   dia       — contagem por serviço por dia (fuso de São Paulo): é o que
 //               desenha as barras de 90 dias sem ler 13 mil linhas;
-//   trava     — a vez de varrer, global entre colos (ver tomarVez).
+//   trava     — a vez de varrer, global entre colos (ver tomarVez);
+//   marca     — um inteiro com nome, fora da poda de 48 h: o último pedido do
+//               agendador (ver marcarAgendador) e a conta diária de e-mails
+//               de confirmação (ver contarNoDia).
 
 export const JANELA_MS = 48 * 3600_000;          // série e retratos guardados
 export const DIAS_BARRAS = 90;                    // barras diárias por serviço
@@ -63,6 +66,10 @@ const ESQUEMA = [
    )`,
   'CREATE INDEX IF NOT EXISTS dia_dia ON dia(dia)',
   'CREATE TABLE IF NOT EXISTS trava (nome TEXT PRIMARY KEY, ate INTEGER NOT NULL)',
+  // Tabela nova num banco que já existe: o IF NOT EXISTS a cria no primeiro
+  // uso depois do deploy (cada isolate novo roda o esquema uma vez), sem
+  // migração à mão — o mesmo caminho por que as outras nasceram.
+  'CREATE TABLE IF NOT EXISTS marca (nome TEXT PRIMARY KEY, valor INTEGER NOT NULL)',
 ];
 
 // Por isolate: depois da primeira vez, nenhuma consulta a mais por pedido.
@@ -87,6 +94,21 @@ export async function tomarVez(DB, agora = Date.now(), intervalo = VARREDURA_MIN
   const ins = await DB.prepare("INSERT OR IGNORE INTO trava (nome, ate) VALUES ('varredura', ?)")
     .bind(agora + intervalo).run();
   return ins?.meta?.changes === 1;
+}
+
+// Conta um evento no dia (fuso de São Paulo) e diz se ainda cabia no teto.
+// Um upsert só, atômico como a trava: com o teto atingido, o `WHERE` do
+// DO UPDATE não casa e nada muda — `changes` 0 é a recusa. Custa uma linha
+// escrita por evento aceito e nenhuma por recusa; os dias velhos saem junto.
+export async function contarNoDia(DB, prefixo, teto, agora = Date.now()) {
+  await garantirEsquema(DB);
+  const hoje = `${prefixo}:${diaLocal(agora)}`;
+  const [upd] = await DB.batch([
+    DB.prepare(`INSERT INTO marca (nome, valor) VALUES (?, 1)
+                ON CONFLICT (nome) DO UPDATE SET valor = valor + 1 WHERE valor < ?`).bind(hoje, teto),
+    DB.prepare('DELETE FROM marca WHERE nome LIKE ? AND nome < ?').bind(`${prefixo}:%`, hoje),
+  ]);
+  return upd?.meta?.changes === 1;
 }
 
 export async function lerRetrato(DB) {
@@ -238,13 +260,26 @@ export function barrasDiarias(porDia, agora = Date.now()) {
   return { tipo: 'diario', fonte: 'd1', periodos, servicos };
 }
 
-// Última varredura feita pelo agendador da Cloudflare (origem 'agendador'),
-// dentro da janela guardada. Usa o índice por `em`; lê no máximo as linhas
-// da janela (≤ 288 com o agendador de 10 min).
+// O último PEDIDO do agendador, guardado em `marca` — fora da poda de 48 h
+// da `varredura` e gravado mesmo quando outro pedido estava com a vez. Só com
+// as linhas da `varredura`, um agendador morto havia mais de 48 h virava
+// "nunca implantado" para o vigia (alarme verde de novo), e quem segurasse a
+// trava com `?varrer` fazia um agendador vivo parecer parado. Uma linha
+// escrita por tique (144/dia) no D1, que tem folga para isso.
+export async function marcarAgendador(DB, agora = Date.now()) {
+  await garantirEsquema(DB);
+  await DB.prepare(`INSERT INTO marca (nome, valor) VALUES ('agendador', ?)
+                    ON CONFLICT (nome) DO UPDATE SET valor = excluded.valor`).bind(agora).run();
+}
+
+// Quando o agendador deu sinal pela última vez: a marca, ou — num banco de
+// antes da marca existir — a última varredura dele na janela guardada.
 export async function ultimaDoAgendador(DB) {
   await garantirEsquema(DB);
-  const row = await DB.prepare("SELECT MAX(em) AS em FROM varredura WHERE origem = 'agendador'").first();
-  return row && row.em != null ? Number(row.em) : null;
+  const m = await DB.prepare("SELECT valor AS em FROM marca WHERE nome = 'agendador'").first();
+  const v = await DB.prepare("SELECT MAX(em) AS em FROM varredura WHERE origem = 'agendador'").first();
+  const ems = [m, v].map((r) => (r && r.em != null ? Number(r.em) : null)).filter((x) => x != null);
+  return ems.length ? Math.max(...ems) : null;
 }
 
 // /api/retrato — só a idade do retrato. É o que um vigia de fora (o cron do
@@ -254,7 +289,7 @@ export async function onRequestGet(context) {
   const DB = context.env.STATUS_DB;
   const headers = { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' };
   if (!DB) {
-    return new Response(JSON.stringify({ configurado: false, detalhe: 'STATUS_DB não configurado — sem retrato compartilhado' }), { headers });
+    return new Response(JSON.stringify({ configurado: false, detalhe: 'retrato compartilhado não configurado' }), { headers });
   }
   try {
     const r = await lerRetrato(DB);
@@ -270,7 +305,7 @@ export async function onRequestGet(context) {
       ttlMs: RETRATO_TTL_MS,
       // O vigia (monitor.yml) precisa separar "o agendador parou" de "o
       // agendador nunca existiu" (Worker ainda não implantado): só o primeiro
-      // é alarme. Sem varredura dele na janela de 48 h, `ultimaEm` é null.
+      // é alarme. `ultimaEm` só é null se o agendador nunca pediu nada.
       agendador: {
         ultimaEm: ag ? new Date(ag).toISOString() : null,
         idadeMs: ag ? agora - ag : null,
