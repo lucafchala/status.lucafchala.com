@@ -7,6 +7,9 @@
 // incidentes das últimas 48 h numa linha do tempo; latência, terceiros e
 // cotas embaixo.
 
+// A conta do medidor mora em uptime.js (carregado antes deste arquivo).
+const { mediaPct, uptimeJanela, classeUptime } = window.lfUptime;
+
 const SERVICES = [
   { name: 'lucafchala.com',      url: 'https://lucafchala.com',                group: 'principal' },
   { name: 'Rádio',               url: 'https://radio.lucafchala.com',           group: 'principal' },
@@ -582,18 +585,6 @@ function descreveBarra(barras, nome, k) {
   return partes.join(' · ');
 }
 
-// Disponibilidade da janela: média ponderada pelo que se sabe. Dia sem dado
-// não entra — nem como 100 %, nem como 0.
-function uptimeJanela(lista) {
-  let peso = 0, soma = 0;
-  for (const b of lista) {
-    if (!b || !b.estado || b.pct == null) continue;
-    const w = b.varreduras || 1;
-    peso += w; soma += w * b.pct;
-  }
-  return peso ? soma / peso : null;
-}
-
 function renderBarras(barras) {
   barrasAtuais = barras && !barras.erro && Array.isArray(barras.periodos) ? barras : null;
   const legenda = document.getElementById('barras-legenda');
@@ -643,19 +634,6 @@ function mostraBarra(el) {
 }
 
 // ── Medidor de uptime ───────────────────────────────────────────────────
-// Média simples entre os serviços que TÊM dado: quem está sem leitura
-// (homelab mudo, histórico novo) não entra — nem como 100 %, nem como 0.
-function mediaPct(valores) {
-  const v = valores.filter((x) => x != null && Number.isFinite(x));
-  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
-}
-
-// Verde só a partir de 99,9 %; abaixo de 99 % é vermelho. Sem dado, neutro.
-function classeUptime(p) {
-  if (p == null) return 'nd';
-  return p >= 99.9 ? 'up' : p >= 99 ? 'degraded' : 'down';
-}
-
 function pintaJanela(id, p) {
   const li = document.getElementById(`jan-${id}`);
   const txt = document.getElementById(`jan-${id}-pct`);

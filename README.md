@@ -63,7 +63,7 @@ Part of the [lucafchala.com ecosystem](https://github.com/lucafchala/lucafchala.
 | `/api/status-history` | GET | The 48 h transition log: `{ entries, services, flapping, worstSeverity }`. `services[name].lastIncident` gives severity, start, duration, whether it's resolved and how long ago — the context a live‑only dashboard structurally can't show. `flapping` names services with ≥ 4 transitions in the window, the failure a 60‑second poll hides best. Corrupt KV reads as an empty log, never a 500. Edge-cached 30 s. | `STATUS_KV` |
 | `/api/quota-stats` | GET | Cloudflare free‑tier headroom (KV writes/reads/deletes/lists + storage, Workers requests + CPU p99, D1 rows) and TLS certificate expiry per zone. Each dataset is queried separately so one unreadable dataset costs that row only, not the panel; a dataset that fails reports `status: unknown` (never `up`) and is listed in `errors[]`. A certificate the token can't read (missing **SSL and Certificates : Read** scope) is also `unknown` with the reason — not `degraded`, which would invent a certificate problem — and stays out of change detection. Warns at 75 % of a limit, critical at 95 %; certificates flag under 30 days. Also, for **reading, not alerting**: `porWorker` (requests, invocation errors and error %, CPU p50/p99 in ms — per script, from the same query that used to be summed), `workerPorHora` (fotos hour by hour over the last 24 h) and `durableObjects` (requests per script — fotos keeps its counters and rate limit in DOs). Each new dataset is its own query, so a field the plan doesn't expose costs only that row, listed in `errors[]`. Edge-cached 5 min. Answers `configured: false` when the API token is absent. | `CF_API_TOKEN`, `CF_ACCOUNT_ID` |
 | `/api/latency-trends` | GET | Response‑time trend per service over 48 h: `{ services, worsening, entries, samples }`. `services[name]` carries `p50/p95/p99`, `min/max` and a `trend` comparing the recent half of the window against the older half. Answers the question a live dashboard structurally can't — not *"is it slow?"* but *"is it **getting** slow?"* — since a service that drifts from 300 ms to 1800 ms is still green and still the earliest warning available. Measures nothing new: `rt` is already taken every sweep and was simply discarded. Written at most **once every ~30 min** (~48 KV writes/day, never more than 50, ~5 % of the free‑tier quota), decided by the **age of the newest sample** rather than by the wall clock — a clock window both missed samples when the cron ran late (3 samples in 48 h in production) and wrote several per window with the dashboard open. Corrupt KV reads as an empty series, never a 500. Edge-cached 2 min. | `STATUS_KV` |
-| `/api/resumo` | GET | **Public, cross-origin summary for other sites** (the lucafchala.com homepage's status dots): `{ retratoCompartilhado, checkedAt, atrasado, services: [{ name, url, status }] }`, ~1 KB. **Only reads** the latest D1 snapshot — never sweeps, never calls third parties — so a visitor of another site can't generate probe cost. `Access-Control-Allow-Origin: *`, no cookies, cached 60 s at the edge and in the browser under a fixed key. Without `STATUS_DB` (or with D1 down): `{ retratoCompartilhado: false, services: [] }`, still 200. Added because `/api/painel` has no CORS and weighs ~90 KB (2026-09-25). | `STATUS_DB` |
+| `/api/resumo` | GET | **Public, cross-origin summary for other sites** (the lucafchala.com homepage's status dots): `{ retratoCompartilhado, checkedAt, atrasado, uptime: { h24, h48 } | null, services: [{ name, url, status }] }`, ~1 KB. `uptime` is the **uptime meter's** number — the average availability (%) of the services that have data over the last 24 h / 48 h, same rule as the page (`uptime.js`); `null` if the series can't be read, never 100. **Only reads** the latest D1 snapshot — never sweeps, never calls third parties — so a visitor of another site can't generate probe cost. `Access-Control-Allow-Origin: *`, no cookies, cached 60 s at the edge and in the browser under a fixed key. Without `STATUS_DB` (or with D1 down): `{ retratoCompartilhado: false, services: [] }`, still 200. Added because `/api/painel` has no CORS and weighs ~90 KB (2026-09-25). | `STATUS_DB` |
 | `/api/retrato` | GET | Age of the shared snapshot only: `{ configurado, em, origem, idadeMs, atrasado, ttlMs, agendador: { ultimaEm, idadeMs } }` (`no-store`) — `agendador` is the scheduler's own last sweep, so the watchdog can tell "the scheduler stopped" from "visitors kept the snapshot fresh". What an outside watchdog polls to learn the scheduler died, without sweeping or downloading the snapshot. `configurado: false` without `STATUS_DB`. | `STATUS_DB` |
 | `/api/healthz` | GET | Liveness probe. **Public answer is `{ ok: true }` only.** With an `X-Status-Token` header equal to `STATUS_ADMIN_TOKEN`: `{ ok, kv, resendKey, notifyTo, subscribers, pendingAlerts, turnstile, cloudflareApi }`. Which secrets are missing and how many people are subscribed used to be public. | (`STATUS_ADMIN_TOKEN` for the detail) |
 
@@ -175,6 +175,7 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
 .
 ├── index.html                       # Static dashboard markup (no inline script/style — strict CSP)
 ├── app.js / app.css / tema.js       # The dashboard's script, styles, and the pre-paint theme
+├── uptime.js                        # The uptime meter's math (mean, window, colour thresholds) — one copy, used by app.js and /api/resumo
 ├── cancelar.css                     # Styles of the unsubscribe / confirm pages (Functions; same strict CSP)
 ├── fonts/                           # Self-hosted variable WOFF2 (content-hashed names) + OFL licenses
 ├── agendador/                       # The scheduler: a Worker with only a Cron Trigger (*/10) that requests a sweep
@@ -187,7 +188,7 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
     └── api/
         ├── status.js                # GET  /api/status              — checks 13 first-party services (incl. dashboard) + reads the homelab watchdog
         ├── painel.js                # GET  /api/painel              — everything the page reads, in one call
-        ├── resumo.js                # GET  /api/resumo              — tiny public summary with CORS, for the homepage dots (reads D1 only)
+        ├── resumo.js                # GET  /api/resumo              — tiny public summary with CORS, for the homepage dots + the average uptime (reads D1 only)
         ├── retrato.js               # GET  /api/retrato             — snapshot age; owns the D1 schema, the global sweep lock and the bars
         ├── status-history.js        # GET  /api/status-history      — 48h transition log; also owns the log's shape for the writer in status.js
         ├── quota-stats.js           # GET  /api/quota-stats         — Cloudflare free-tier headroom + TLS expiry
@@ -207,10 +208,18 @@ Add bindings/secrets in the Cloudflare Pages project settings (or `npx wrangler 
     ├── custo.test.mjs               # what one sweep costs, counted request by request
     ├── pagina.test.mjs              # the static page and the unsubscribe page vs. the strict CSP
     ├── resumo.test.mjs              # /api/resumo: CORS, small payload, never probes, fixed cache key
+    ├── uptime.test.mjs              # uptime meter: missing data never counts as 100 %, colour thresholds, /api/resumo's `uptime`, the page's ids and script order
     ├── homelab.test.mjs             # Homelab: read from its watchdog, "sem dados" never down, never an e-mail, no address leaked
     ├── alertas.test.mjs             # alert rules (cooldown per state, batches, retry queue, owner-only), third parties, double opt-in, healthz redaction
     └── d1.mjs                       # D1 over real SQLite (node:sqlite) for the tests
 ```
+
+---
+
+## Uptime meter and layout
+
+- **Meter** (top right, next to the summary banner): a ring with the average availability over the longest window known (90 daily bars; with no database, the 48 hourly bars), plus 24 h / 48 h / history bars. Average = simple mean across services **that have data** — a service or day without a reading is left out, never counted as 100 % or 0 % (same "unknown is not up" rule as everywhere). Colours: green ≥ 99.9 %, amber ≥ 99 %, red below, neutral without data. The math lives in `uptime.js` (a classic script, `window.lfUptime`; Node and the Worker import it for the side effect) so the page and `/api/resumo` can't diverge. The ring and bar widths are set with CSSOM — the CSP forbids `style=`.
+- **Desktop layout** (≥ 960 px, container 1120 px): banner + meter side by side; each service group's cards in two columns; incidents / latency and third parties / quotas side by side. Below 960 px it is the single column it always was.
 
 ---
 
