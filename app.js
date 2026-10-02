@@ -58,6 +58,9 @@ const S = {
     version: 'versão',
     no_data_bar: 'sem dado',
     available: (p) => `${p} disponível`,
+    uptime_aria: (p, rot) => `Uptime médio, ${rot}: ${p}`,
+    uptime_hist: (n, diario) => `${n} ${diario ? 'd' : 'h'}`,
+    uptime_avg: 'média',
     n_down_sweeps: (n) => `${n} varredura${n > 1 ? 's' : ''} fora do ar`,
     n_slow: (n) => `${n} degradada${n > 1 ? 's' : ''}`,
     of_n: (n) => `de ${n}`,
@@ -123,6 +126,9 @@ const S = {
     version: 'version',
     no_data_bar: 'no data',
     available: (p) => `${p} available`,
+    uptime_aria: (p, rot) => `Average uptime, ${rot}: ${p}`,
+    uptime_hist: (n, diario) => `${n} ${diario ? 'd' : 'h'}`,
+    uptime_avg: 'average',
     n_down_sweeps: (n) => `${n} sweep${n > 1 ? 's' : ''} down`,
     n_slow: (n) => `${n} degraded`,
     of_n: (n) => `of ${n}`,
@@ -178,6 +184,8 @@ const S = {
 // o que aparece sem JavaScript; aqui só o inglês.
 const HTML_EN = {
   skip: 'Skip to services',
+  h_uptime: 'Uptime',
+  uptime_note: 'average of all services',
   brand_aria: 'Status lucafchala.com — home',
   nav_aria: 'Actions',
   alerts_btn: 'Get alerts',
@@ -634,6 +642,54 @@ function mostraBarra(el) {
   if (info) info.textContent = descreveBarra(barrasAtuais, SERVICES[i].name, k);
 }
 
+// ── Medidor de uptime ───────────────────────────────────────────────────
+// Média simples entre os serviços que TÊM dado: quem está sem leitura
+// (homelab mudo, histórico novo) não entra — nem como 100 %, nem como 0.
+function mediaPct(valores) {
+  const v = valores.filter((x) => x != null && Number.isFinite(x));
+  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+}
+
+// Verde só a partir de 99,9 %; abaixo de 99 % é vermelho. Sem dado, neutro.
+function classeUptime(p) {
+  if (p == null) return 'nd';
+  return p >= 99.9 ? 'up' : p >= 99 ? 'degraded' : 'down';
+}
+
+function pintaJanela(id, p) {
+  const li = document.getElementById(`jan-${id}`);
+  const txt = document.getElementById(`jan-${id}-pct`);
+  const barra = document.getElementById(`jan-${id}-barra`);
+  if (!li || !txt || !barra) return;
+  li.className = `janela ${classeUptime(p)}`;
+  txt.textContent = fmtPct(p);
+  barra.style.width = p == null ? '0%' : `${Math.max(0, Math.min(100, p))}%`;
+}
+
+function renderMedidor(p) {
+  const up = (p && p.uptime) || {};
+  const pctDe = (mapa) => mediaPct(SERVICES.map((s) => mapa && mapa[s.name] && mapa[s.name].pct));
+  pintaJanela('24', pctDe(up.h24));
+  pintaJanela('48', pctDe(up.h48));
+
+  const barras = p && p.barras && !p.barras.erro && Array.isArray(p.barras.periodos) ? p.barras : null;
+  const diario = !!barras && barras.tipo === 'diario';
+  const n = barras ? barras.periodos.length : 0;
+  const hist = barras ? mediaPct(SERVICES.map((s) => uptimeJanela(barras.servicos[s.name] || []))) : null;
+  pintaJanela('hist', hist);
+  const rot = barras ? t('uptime_hist', n, diario) : '—';
+  document.getElementById('jan-hist-rot').textContent = rot;
+
+  // O anel mostra a maior janela que se conhece; sem ela, a de 48 h.
+  const principal = hist != null ? hist : pctDe(up.h48);
+  const anel = document.getElementById('anel-90');
+  anel.className = `anel ${classeUptime(principal)}`;
+  document.getElementById('anel-valor').style.strokeDasharray = `${principal == null ? 0 : Math.max(0, Math.min(100, principal))} 100`;
+  document.getElementById('anel-pct').textContent = fmtPct(principal);
+  document.getElementById('anel-rotulo').textContent = hist != null ? `${t('uptime_avg')} ${rot}` : t('uptime_avg');
+  anel.setAttribute('aria-label', t('uptime_aria', fmtPct(principal), hist != null ? rot : '48 h'));
+}
+
 function applyUptime(uptime) {
   const h24 = (uptime && uptime.h24) || {};
   const h48 = (uptime && uptime.h48) || {};
@@ -991,6 +1047,7 @@ function desenharPainel(p) {
     ['incidentes', () => renderIncidentes(p.historico)],
     ['barras', () => renderBarras(p.barras)],
     ['uptime', () => applyUptime(p.uptime)],
+    ['medidor', () => renderMedidor(p)],
     ['notas', () => applyServiceNotes(historicoAtual)],
     ['latência', () => renderLatency(p.latencia, p.implantacoes)],
   ];

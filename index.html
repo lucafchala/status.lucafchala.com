@@ -55,6 +55,7 @@
 <main class="wrap" id="conteudo">
 
   <!-- A faixa-resumo: o estado de tudo numa frase. -->
+  <div class="topo-grade">
   <section class="resumo" aria-labelledby="banner-text">
     <div class="faixa estado-checking" id="banner">
       <span class="faixa-icone" id="banner-icone" aria-hidden="true">…</span>
@@ -68,6 +69,33 @@
       <button class="btn btn-fantasma btn-pequeno" id="btn-refresh" type="button" data-action="atualizar">↻ atualizar</button>
     </div>
   </section>
+
+  <!-- Medidor de uptime: média da disponibilidade de todos os serviços que
+       têm dado. Número e anel são preenchidos pelo app.js (renderMedidor). -->
+  <section class="medidor" id="medidor" aria-labelledby="h-medidor">
+    <div class="medidor-topo">
+      <h2 id="h-medidor" data-i18n="h_uptime">Uptime</h2>
+      <p class="secao-nota" id="medidor-nota" data-i18n="uptime_note">média de todos os serviços</p>
+    </div>
+    <div class="medidor-corpo">
+      <div class="anel" id="anel-90" role="img" aria-label="">
+        <svg viewBox="0 0 120 120" aria-hidden="true" focusable="false">
+          <circle class="anel-fundo" cx="60" cy="60" r="52" pathLength="100"></circle>
+          <circle class="anel-valor" id="anel-valor" cx="60" cy="60" r="52" pathLength="100"></circle>
+        </svg>
+        <div class="anel-texto">
+          <strong id="anel-pct">—</strong>
+          <span id="anel-rotulo"></span>
+        </div>
+      </div>
+      <ul class="janelas" id="janelas">
+        <li class="janela" id="jan-24"><span class="janela-rot">24 h</span><span class="janela-pct" id="jan-24-pct">—</span><span class="janela-barra"><i id="jan-24-barra"></i></span></li>
+        <li class="janela" id="jan-48"><span class="janela-rot">48 h</span><span class="janela-pct" id="jan-48-pct">—</span><span class="janela-barra"><i id="jan-48-barra"></i></span></li>
+        <li class="janela" id="jan-hist"><span class="janela-rot" id="jan-hist-rot">90 d</span><span class="janela-pct" id="jan-hist-pct">—</span><span class="janela-barra"><i id="jan-hist-barra"></i></span></li>
+      </ul>
+    </div>
+  </section>
+  </div>
 
   <!-- Anuncia só MUDANÇA de estado (não cada atualização) a leitores de tela. -->
   <div class="sr-only" id="anuncio" aria-live="polite" aria-atomic="true"></div>
@@ -86,6 +114,7 @@
     </ul>
   </section>
 
+  <div class="blocos">
   <section class="secao" id="incidentes-secao" aria-labelledby="h-incidentes">
     <div class="secao-topo">
       <h2 id="h-incidentes" data-i18n="h_incidents">Incidentes recentes</h2>
@@ -102,6 +131,9 @@
     <div class="painel" id="latency-panel"></div>
   </section>
 
+  </div>
+
+  <div class="blocos">
   <section class="secao" aria-labelledby="h-terceiros">
     <div class="secao-topo">
       <h2 id="h-terceiros" data-i18n="h_third">Serviços de terceiros</h2>
@@ -117,6 +149,7 @@
     </div>
     <div class="painel" id="quota-panel"></div>
   </section>
+  </div>
 </main>
 
 <footer class="rodape">
