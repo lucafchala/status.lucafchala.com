@@ -7,6 +7,9 @@
 // incidentes das últimas 48 h numa linha do tempo; latência, terceiros e
 // cotas embaixo.
 
+// A conta do medidor mora em uptime.js (carregado antes deste arquivo).
+const { mediaPct, uptimeJanela, classeUptime } = window.lfUptime;
+
 const SERVICES = [
   { name: 'lucafchala.com',      url: 'https://lucafchala.com',                group: 'principal' },
   { name: 'Rádio',               url: 'https://radio.lucafchala.com',           group: 'principal' },
@@ -58,6 +61,9 @@ const S = {
     version: 'versão',
     no_data_bar: 'sem dado',
     available: (p) => `${p} disponível`,
+    uptime_aria: (p, rot) => `Uptime médio, ${rot}: ${p}`,
+    uptime_hist: (n, diario) => `${n} ${diario ? 'd' : 'h'}`,
+    uptime_avg: 'média',
     n_down_sweeps: (n) => `${n} varredura${n > 1 ? 's' : ''} fora do ar`,
     n_slow: (n) => `${n} degradada${n > 1 ? 's' : ''}`,
     of_n: (n) => `de ${n}`,
@@ -123,6 +129,9 @@ const S = {
     version: 'version',
     no_data_bar: 'no data',
     available: (p) => `${p} available`,
+    uptime_aria: (p, rot) => `Average uptime, ${rot}: ${p}`,
+    uptime_hist: (n, diario) => `${n} ${diario ? 'd' : 'h'}`,
+    uptime_avg: 'average',
     n_down_sweeps: (n) => `${n} sweep${n > 1 ? 's' : ''} down`,
     n_slow: (n) => `${n} degraded`,
     of_n: (n) => `of ${n}`,
@@ -178,6 +187,8 @@ const S = {
 // o que aparece sem JavaScript; aqui só o inglês.
 const HTML_EN = {
   skip: 'Skip to services',
+  h_uptime: 'Uptime',
+  uptime_note: 'average of all services',
   brand_aria: 'Status lucafchala.com — home',
   nav_aria: 'Actions',
   alerts_btn: 'Get alerts',
@@ -574,18 +585,6 @@ function descreveBarra(barras, nome, k) {
   return partes.join(' · ');
 }
 
-// Disponibilidade da janela: média ponderada pelo que se sabe. Dia sem dado
-// não entra — nem como 100 %, nem como 0.
-function uptimeJanela(lista) {
-  let peso = 0, soma = 0;
-  for (const b of lista) {
-    if (!b || !b.estado || b.pct == null) continue;
-    const w = b.varreduras || 1;
-    peso += w; soma += w * b.pct;
-  }
-  return peso ? soma / peso : null;
-}
-
 function renderBarras(barras) {
   barrasAtuais = barras && !barras.erro && Array.isArray(barras.periodos) ? barras : null;
   const legenda = document.getElementById('barras-legenda');
@@ -632,6 +631,41 @@ function mostraBarra(el) {
   document.querySelectorAll(`#barras-${i} .b.ativa`).forEach(x => x.classList.remove('ativa'));
   el.classList.add('ativa');
   if (info) info.textContent = descreveBarra(barrasAtuais, SERVICES[i].name, k);
+}
+
+// ── Medidor de uptime ───────────────────────────────────────────────────
+function pintaJanela(id, p) {
+  const li = document.getElementById(`jan-${id}`);
+  const txt = document.getElementById(`jan-${id}-pct`);
+  const barra = document.getElementById(`jan-${id}-barra`);
+  if (!li || !txt || !barra) return;
+  li.className = `janela ${classeUptime(p)}`;
+  txt.textContent = fmtPct(p);
+  barra.style.width = p == null ? '0%' : `${Math.max(0, Math.min(100, p))}%`;
+}
+
+function renderMedidor(p) {
+  const up = (p && p.uptime) || {};
+  const pctDe = (mapa) => mediaPct(SERVICES.map((s) => mapa && mapa[s.name] && mapa[s.name].pct));
+  pintaJanela('24', pctDe(up.h24));
+  pintaJanela('48', pctDe(up.h48));
+
+  const barras = p && p.barras && !p.barras.erro && Array.isArray(p.barras.periodos) ? p.barras : null;
+  const diario = !!barras && barras.tipo === 'diario';
+  const n = barras ? barras.periodos.length : 0;
+  const hist = barras ? mediaPct(SERVICES.map((s) => uptimeJanela(barras.servicos[s.name] || []))) : null;
+  pintaJanela('hist', hist);
+  const rot = barras ? t('uptime_hist', n, diario) : '—';
+  document.getElementById('jan-hist-rot').textContent = rot;
+
+  // O anel mostra a maior janela que se conhece; sem ela, a de 48 h.
+  const principal = hist != null ? hist : pctDe(up.h48);
+  const anel = document.getElementById('anel-90');
+  anel.className = `anel ${classeUptime(principal)}`;
+  document.getElementById('anel-valor').style.strokeDasharray = `${principal == null ? 0 : Math.max(0, Math.min(100, principal))} 100`;
+  document.getElementById('anel-pct').textContent = fmtPct(principal);
+  document.getElementById('anel-rotulo').textContent = hist != null ? `${t('uptime_avg')} ${rot}` : t('uptime_avg');
+  anel.setAttribute('aria-label', t('uptime_aria', fmtPct(principal), hist != null ? rot : '48 h'));
 }
 
 function applyUptime(uptime) {
@@ -991,6 +1025,7 @@ function desenharPainel(p) {
     ['incidentes', () => renderIncidentes(p.historico)],
     ['barras', () => renderBarras(p.barras)],
     ['uptime', () => applyUptime(p.uptime)],
+    ['medidor', () => renderMedidor(p)],
     ['notas', () => applyServiceNotes(historicoAtual)],
     ['latência', () => renderLatency(p.latencia, p.implantacoes)],
   ];
