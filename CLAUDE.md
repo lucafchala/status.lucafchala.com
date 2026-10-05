@@ -50,3 +50,7 @@ Every change leaves its trace in the docs **in the same PR** — never "later":
 ## Checks
 
 Run `node --test tests/*.test.mjs` and the steps in `.github/workflows/checks.yml` before pushing. For UI changes, also load the page in a real browser under the `_headers` CSP: a CSP violation only shows up there.
+
+## SEO
+
+The head carries `robots` (with `max-image-preview:large`), Open Graph / Twitter tags (image: the shared card on lucafchala.com) and `<link rel="author" href="https://lucafchala.com/">`. `rel="author"` doesn't load anything, so `tests/pagina.test.mjs` exempts it from the same-origin resource rule like `canonical` and `sitemap`. No JSON-LD here: the test above forbids any inline `<script>` body. Bump `lastmod` in `sitemap.xml` when the page changes.
