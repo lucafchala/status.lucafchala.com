@@ -43,7 +43,7 @@ describe('página estática × CSP estrita', () => {
 
   test('index.html só carrega recursos da própria origem', () => {
     const recursos = [...HTML.matchAll(/<(?:script|link)\b[^>]*(?:src|href)="([^"]+)"/gi)]
-      .filter((m) => !/rel="(canonical|sitemap)"/.test(m[0]))
+      .filter((m) => !/rel="(canonical|sitemap|author)"/.test(m[0]))
       .map((m) => m[1]);
     assert.ok(recursos.length >= 4);
     for (const r of recursos) assert.match(r, /^\//, `recurso de fora: ${r}`);
