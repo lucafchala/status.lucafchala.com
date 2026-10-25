@@ -57,7 +57,7 @@ describe('página estática × CSP estrita', () => {
 
   test('cada fonte do app.css existe, está no preload certo, e o hash do nome é o do conteúdo', () => {
     const fontes = [...CSS.matchAll(/url\('(\/fonts\/[^']+\.woff2)'\)/g)].map((m) => m[1]);
-    assert.equal(fontes.length, 3);
+    assert.equal(fontes.length, 2); // Inter + JetBrains Mono (código)
     for (const f of fontes) {
       const caminho = new URL('.' + f, raiz);
       assert.ok(existsSync(caminho), `${f} não existe`);

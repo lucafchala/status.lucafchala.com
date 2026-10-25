@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Status — lucafchala.com</title>
-  <meta name="theme-color" content="#0d0c0a" />
+  <meta name="theme-color" content="#0a0a0a" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <meta name="description" content="Status dos serviços do ecossistema lucafchala.com: disponibilidade agora, histórico de 90 dias e incidentes recentes." />
   <link rel="canonical" href="https://status.lucafchala.com/" />
@@ -25,8 +25,7 @@
   <meta name="twitter:description" content="Status dos serviços do ecossistema lucafchala.com: disponibilidade agora, histórico de 90 dias e incidentes recentes." />
   <meta name="twitter:image" content="https://lucafchala.com/og.png" />
   <link rel="sitemap" type="application/xml" href="/sitemap.xml" />
-  <link rel="preload" as="font" type="font/woff2" href="/fonts/jetbrains-mono-latin-wght-normal.18be452724.woff2" crossorigin />
-  <link rel="preload" as="font" type="font/woff2" href="/fonts/cormorant-garamond-latin-wght-normal.d80df8ff5a.woff2" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/inter-latin-wght-normal.3100e775e8.woff2" crossorigin />
   <link rel="stylesheet" href="/app.css" />
   <script src="/tema.js" data-cfasync="false"></script>
 </head>
@@ -77,7 +76,7 @@
       <span class="faixa-icone" id="banner-icone" aria-hidden="true">…</span>
       <div class="faixa-texto">
         <h1 class="faixa-titulo" id="banner-text" data-i18n="checking_all">Verificando serviços…</h1>
-        <p class="faixa-detalhe" id="banner-sub"></p>
+        <p class="faixa-detalhe" id="banner-sub"><noscript>Esta página precisa de JavaScript para mostrar o estado ao vivo. Sem ele, os serviços abaixo aparecem só pelo nome. Cada um é um site do ecossistema lucafchala.com e é verificado a cada 10 minutos.</noscript></p>
       </div>
     </div>
     <div class="idade-linha">
@@ -121,7 +120,25 @@
       <h2 id="h-servicos" data-i18n="h_services">Serviços</h2>
       <p class="secao-nota" id="barras-legenda" data-i18n="history">histórico</p>
     </div>
-    <div id="services-list"></div>
+    <div id="services-list">
+      <!-- Esqueleto estático: nomes à vista antes (e sem) JavaScript. O app.js troca tudo por renderSkeletons(). -->
+      <ul class="componentes">
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">lucafchala.com</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Rádio</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Fotos</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Fotos — Dashboard</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Dash</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Paste</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">URL</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Keys</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Proof</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">RG</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Pays</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Treino</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Status</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+        <li class="componente"><div class="comp-linha"><div class="comp-nome"><span class="comp-nome-txt">Homelab</span></div><span class="estado checking"><span class="estado-ic" aria-hidden="true">…</span></span></div></li>
+      </ul>
+    </div>
     <ul class="legenda" aria-label="Legenda das barras" data-i18n-attr="aria-label:legend_aria">
       <li><span class="b-amostra up" aria-hidden="true"></span><span data-i18n="lg_up">operacional</span></li>
       <li><span class="b-amostra degraded" aria-hidden="true"></span><span data-i18n="lg_degraded">degradado</span></li>
