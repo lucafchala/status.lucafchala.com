@@ -60,20 +60,34 @@ async function checkCloudflare() {
     return { ...atlassianStatus({ status: { indicator: json?.status?.indicator } }), description: 'Brazil PoP data unavailable' };
   }
 
-  // Worst status among matched Brazil components
-  let worst = 'up';
-  for (const c of brazil) {
-    const mapped = componentStatus(c.status);
-    if (mapped === 'down') { worst = 'down'; break; }
-    if (mapped === 'degraded') worst = 'degraded';
-  }
+  return { status: estadoBrasil(brazil), description: descreverBrasil(brazil) };
+}
 
+// A Cloudflare tem ~30 PoPs no Brasil e quase sempre algum pequeno (Palmas,
+// Campos dos Goytacazes…) aparece com problema — o tráfego dele é desviado
+// sozinho para o vizinho. "O pior entre todos" deixava o Cloudflare vermelho
+// por um PoP que ninguém daqui usa. A régua agora: São Paulo (GRU), por onde
+// passa o tráfego do ecossistema, manda; os outros só pesam quando o problema
+// é amplo — ≥ 1/3 com problema vira degradado, ≥ 1/2 fora vira offline. Os
+// nomes afetados continuam todos na descrição.
+export function estadoBrasil(brazil) {
+  const gru = brazil.find((c) => /\(GRU\)|são paulo|sao paulo/i.test(c.name || ''));
+  let estado = gru ? componentStatus(gru.status) : 'up';
+  const outros = brazil.filter((c) => c !== gru);
+  if (outros.length) {
+    const comProblema = outros.filter((c) => c.status !== 'operational').length / outros.length;
+    const fora = outros.filter((c) => componentStatus(c.status) === 'down').length / outros.length;
+    if (fora >= 0.5) estado = 'down';
+    else if (comProblema >= 1 / 3 && estado === 'up') estado = 'degraded';
+  }
+  return estado;
+}
+
+function descreverBrasil(brazil) {
   const affected = brazil.filter(c => c.status !== 'operational');
-  const description = affected.length === 0
+  return affected.length === 0
     ? 'All Brazil PoPs Operational'
     : affected.map(c => c.name).join(', ');
-
-  return { status: worst, description };
 }
 
 // Os feeds do Google (Cloud e Workspace) listam incidentes ANTIGOS também; o

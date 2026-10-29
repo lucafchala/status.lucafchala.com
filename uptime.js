@@ -36,5 +36,21 @@
     return p >= 99.9 ? 'up' : p >= 99 ? 'degraded' : 'down';
   }
 
-  g.lfUptime = { mediaPct, uptimeJanela, classeUptime };
+  // Cor de um dia das barras. Uma varredura lenta entre 144 não pinta o dia
+  // inteiro de amarelo (era o que enchia a página de amarelo sem nada ter
+  // acontecido): o dia segue a mesma régua do medidor sobre a disponibilidade
+  // e só fica amarelo por lentidão quando ela dura de verdade — 5 % das
+  // varreduras, ~1 h 12 min num dia cheio. O detalhe (lentas/fora) continua
+  // na dica da barra, então nada some, só deixa de gritar.
+  const LIMIAR_LENTAS = 0.05;
+  function classeDia(c) {
+    if (!c || !c.total) return null;
+    const down = c.down || 0, lentas = c.degraded || 0;
+    const pct = ((c.total - down) / c.total) * 100;
+    const cls = classeUptime(pct);
+    if (cls !== 'up') return cls;
+    return lentas / c.total >= LIMIAR_LENTAS ? 'degraded' : 'up';
+  }
+
+  g.lfUptime = { mediaPct, uptimeJanela, classeUptime, classeDia, LIMIAR_LENTAS };
 })(globalThis);

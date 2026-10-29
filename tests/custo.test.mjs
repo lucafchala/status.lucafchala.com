@@ -15,7 +15,7 @@ const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
 
 const MARCAS = [
-  'Luca', 'Radio', 'fotos', '/dashboard/login', 'Painel', 'Paste', 'url.lucafchala.com', 'Chaves',
+  'Luca', 'Radio', 'fotos', 'Painel', 'Paste', 'url.lucafchala.com', 'Chaves',
   'Acesso restrito', 'subs', 'Hevy', 'monitoramento de serviços', 'data-title="', 'drive-turnstile',
   'rem-turnstile', 'property="og:title"', 'cf-turnstile', 'Termos de Uso', 'Política de Privacidade', '<svg',
 ].join(' ');
@@ -53,6 +53,9 @@ function mundo(versaoId = 'v1', { dominio403 = false } = {}) {
     if (url.pathname === '/icon.svg') return html('image/svg+xml');
     if (url.pathname === '/og-coming-soon.png') return html('image/png');
     if (url.pathname === '/__status_probe_404__') return new Response('', { status: 404 });
+    if (url.pathname === '/dashboard') {
+      return new Response(null, { status: 302, headers: { location: 'https://equipe.cloudflareaccess.com/cdn-cgi/access/login/fotos.lucafchala.com?redirect_url=%2Fdashboard' } });
+    }
     if (url.pathname === '/proof-of-ownership.txt') return new Response('Luca Ferriani Chala '.repeat(5));
     return html();
   };
