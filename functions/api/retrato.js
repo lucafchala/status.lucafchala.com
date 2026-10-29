@@ -27,6 +27,9 @@
 //               agendador (ver marcarAgendador) e a conta diária de e-mails
 //               de confirmação (ver contarNoDia).
 
+// A cor de cada dia sai da mesma régua do medidor (uptime.js).
+import '../../uptime.js';
+
 export const JANELA_MS = 48 * 3600_000;          // série e retratos guardados
 export const DIAS_BARRAS = 90;                    // barras diárias por serviço
 // Retrato mais velho que isso quer dizer agendador atrasado ou morto: a
@@ -253,7 +256,7 @@ export function barrasDiarias(porDia, agora = Date.now()) {
     servicos[nome] = periodos.map(({ inicio: dia }) => {
       const c = dias[dia];
       if (!c || !c.total) return { estado: null, pct: null };
-      const estado = c.down ? 'down' : c.degraded ? 'degraded' : 'up';
+      const estado = globalThis.lfUptime.classeDia(c);
       return {
         estado,
         pct: Math.round(((c.total - c.down) / c.total) * 10000) / 100,

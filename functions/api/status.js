@@ -93,6 +93,47 @@ async function probePrimary(url, marker, degradedMs = DEGRADED_MS) {
   }
 }
 
+// O /dashboard do fotos fica atrás do Cloudflare Access desde 25/10: quem não
+// tem sessão recebe um 302 para <time>.cloudflareaccess.com. Seguir esse
+// redirecionamento media a tela de login da Cloudflare (sem o marcador antigo
+// `/dashboard/login`) e deixou o painel amarelo dias a fio sem nada quebrado.
+// Por isso a sonda NÃO segue: o 302 para o login do Access é a prova de que o
+// painel está de pé e protegido. Um 200 aqui seria pior que uma queda — o
+// painel aberto sem portão — e aparece como problema, com o motivo escrito.
+export function avaliarAcesso(res, alvo) {
+  const code = res.status;
+  if (code >= 500) return { status: 'down', detail: `HTTP ${code}` };
+  if (code >= 300 && code < 400) {
+    let loc;
+    try { loc = new URL(res.headers.get('location') || '', alvo); } catch { loc = null; }
+    if (loc && loc.hostname.endsWith('.cloudflareaccess.com') && loc.pathname.includes('/cdn-cgi/access/login')) {
+      return { status: 'up', detail: '' };
+    }
+    return { status: 'degraded', detail: 'redireciona para fora do Cloudflare Access' };
+  }
+  if (code >= 200 && code < 300) return { status: 'degraded', detail: 'painel sem Cloudflare Access' };
+  return { status: 'degraded', detail: `HTTP ${code}` };
+}
+
+async function probeAcesso(url) {
+  const start = Date.now();
+  try {
+    const res = await fetchSvc(url, { redirect: 'manual' });
+    const rt = Date.now() - start;
+    res.body?.cancel();
+    const v = avaliarAcesso(res, url);
+    if (v.status === 'up' && rt > DEGRADED_MS) return { status: 'degraded', statusCode: res.status, rt, detail: `resposta lenta (${rt}ms)` };
+    return { ...v, statusCode: res.status, rt };
+  } catch (e) {
+    return { status: 'down', statusCode: null, rt: Date.now() - start, detail: netDetail(e) };
+  }
+}
+
+async function checkAcesso(label, url) {
+  const r = await probeAcesso(url);
+  return { label, status: r.status, detail: r.detail };
+}
+
 // A page sub-check: 2xx + (optionally) the right content. 5xx → down, 4xx or a
 // missing marker → degraded.
 async function checkContent(label, url, { marker, contentType } = {}) {
@@ -748,7 +789,7 @@ export const SERVICES = [
         checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
         // /dashboard também é sondado como serviço próprio ("Fotos — Dashboard")
         // a cada varredura; aqui ele entra só no ritmo das estáticas.
-        est('painel /dashboard', () => checkContent('painel /dashboard', b + '/dashboard', { contentType: 'text/html', marker: '/dashboard/login' })),
+        est('painel /dashboard', () => checkAcesso('painel /dashboard', b + '/dashboard')),
         est('manifest PWA', () => checkJson('manifest PWA', b + '/manifest.json', (j) => {
           if (!j || !j.name) return { detail: 'manifest sem nome' };
           if (!Array.isArray(j.icons) || !j.icons.length || !j.icons[0].src) return { detail: 'manifest sem ícones' };
@@ -773,7 +814,9 @@ export const SERVICES = [
     },
   },
   {
-    name: 'Fotos — Dashboard', url: 'https://fotos.lucafchala.com/dashboard', marker: '/dashboard/login',
+    // Protegido pelo Cloudflare Access: a prova de vida é o 302 para o login
+    // dele (ver avaliarAcesso), não uma página com marcador.
+    name: 'Fotos — Dashboard', url: 'https://fotos.lucafchala.com/dashboard', acesso: true,
   },
   {
     name: 'Dash', url: 'https://dash.lucafchala.com', marker: 'Painel',
@@ -872,7 +915,7 @@ async function checkVigia(svc, env) {
 
 async function checkService(svc, env, anterior) {
   if (svc.vigia) return checkVigia(svc, env);
-  const primary = await probePrimary(svc.url, svc.marker, svc.degradedMs);
+  const primary = svc.acesso ? await probeAcesso(svc.url) : await probePrimary(svc.url, svc.marker, svc.degradedMs);
   let lista = [];
   try { lista = svc.checks ? svc.checks(svc.url, env, primary, anterior) : []; }
   catch (e) { console.error('checks lançou', svc.name, e); lista = [Promise.resolve({ label: 'verificações', ...ERRO_INTERNO })]; }
