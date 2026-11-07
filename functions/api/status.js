@@ -819,6 +819,15 @@ export const SERVICES = [
     name: 'Fotos — Dashboard', url: 'https://fotos.lucafchala.com/dashboard', acesso: true,
   },
   {
+    // O álbum da turma (Colégio Santa Cruz) com domínio próprio, servido pelo
+    // MESMO Worker do fotos (DOMINIOS_DE_ALBUM no fotos). Antes do lançamento a
+    // raiz é a página "em breve"; depois, um 302 para /galeria/entrenos2026 (a
+    // sonda segue o redirect). As duas têm "Entre Nós" — é o contrato. Uma
+    // sonda só: o fundo (Worker, KV, Drive) já é coberto pela linha do Fotos;
+    // esta pega o que é só do domínio (zona, Custom Domain, certificado).
+    name: 'Entre Nós', url: 'https://entrenos2026.com', marker: 'Entre Nós',
+  },
+  {
     name: 'Dash', url: 'https://dash.lucafchala.com', marker: 'Painel',
     checks: (b) => checkDados('data.json (PURLs)', 'atualidade dos dados', b + '/data.json',
       (j) => (j && Array.isArray(j.redirects) ? null : { detail: 'campo redirects ausente' }), { collection: 'redirects' }),
