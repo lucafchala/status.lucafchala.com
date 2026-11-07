@@ -16,7 +16,6 @@ const SERVICES = [
   { name: 'Status',              url: 'https://status.lucafchala.com',          group: 'principal' },
   { name: 'Fotos',               url: 'https://fotos.lucafchala.com',           group: 'apps' },
   { name: 'Fotos — Dashboard',   url: 'https://fotos.lucafchala.com/dashboard', group: 'apps' },
-  { name: 'Entre Nós',           url: 'https://entrenos2026.com',               group: 'apps' },
   { name: 'Dash',                url: 'https://dash.lucafchala.com',            group: 'apps' },
   { name: 'Paste',               url: 'https://paste.lucafchala.com',           group: 'apps' },
   { name: 'URL',                 url: 'https://url.lucafchala.com',             group: 'apps' },
