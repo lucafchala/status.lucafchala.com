@@ -401,3 +401,24 @@ a:hover { color: var(--accent-forte); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Aviso de lançamento de álbum do fotos (app.js → pintaDestaque). Cores fixas,
+   as do Colégio Santa Cruz, iguais à faixa dos outros sites (o /destaque.js do
+   fotos): branco sobre #243580 (11,1:1), amarelo #f9de4b (8,2:1) e o × em #c5cbe6 (6,9:1) — nos dois
+   temas, porque é o aviso de outro site, não parte desta página. */
+.destaque { position: relative; background: #243580; color: #fff; }
+.destaque[hidden] { display: none; }
+.destaque-link {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 2px 12px; min-height: 44px; padding: 8px 52px 8px 16px;
+  color: inherit; text-decoration: none; text-align: center; font-size: 14px; line-height: 1.35;
+}
+.destaque-k { font-size: 11px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: #f9de4b; }
+.destaque-link b { font-weight: 700; }
+.destaque-ver { font-weight: 600; color: #f9de4b; white-space: nowrap; }
+.destaque-link:hover .destaque-ver { text-decoration: underline; }
+.destaque-x {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 44px; height: 44px; border: 0; background: none; color: #c5cbe6; font-size: 20px; cursor: pointer;
+}
+.destaque-link:focus-visible, .destaque-x:focus-visible { outline: 2px solid #f9de4b; outline-offset: -4px; }

@@ -46,6 +46,7 @@ const THIRD_PARTY = [
 // com todo o ecossistema (ver tema.js).
 const S = {
   pt: {
+    destaque_aria: 'Aviso', destaque_novo: 'Novo álbum', destaque_no_ar: ' · o álbum está no ar', destaque_ver: 'Ver o álbum →', destaque_fechar: 'Fechar aviso',
     g_principal: 'Principais', g_apps: 'Aplicativos', g_infra: 'Infraestrutura',
     up_for: (x) => `no ar há ${x}`, down_for: (x) => `fora do ar há ${x}`,
     st_up: 'operacional', st_degraded: 'degradado', st_down: 'fora do ar', st_unknown: 'sem dados', st_checking: 'verificando',
@@ -114,6 +115,7 @@ const S = {
     sub_captcha: 'Complete a verificação anti-robô.',
   },
   en: {
+    destaque_aria: 'Notice', destaque_novo: 'New album', destaque_no_ar: ' · the album is live', destaque_ver: 'See the album →', destaque_fechar: 'Close notice',
     g_principal: 'Main', g_apps: 'Apps', g_infra: 'Infrastructure',
     up_for: (x) => `up for ${x}`, down_for: (x) => `down for ${x}`,
     st_up: 'operational', st_degraded: 'degraded', st_down: 'down', st_unknown: 'no data', st_checking: 'checking',
@@ -1137,6 +1139,7 @@ function toggleLang() {
   lang = lang === 'en' ? 'pt' : 'en';
   salvaPref('lang', lang);
   aplicarIdiomaHtml();
+  pintaDestaque();
   pintaBotaoTema();
   renderSkeletons();
   renderThirdPartySkeletons();
@@ -1255,6 +1258,73 @@ async function doSubscribe() {
 aplicarIdiomaHtml();
 pintaBotaoTema();
 
+// ── Aviso de lançamento (fotos) ─────────────────────────────────────────
+// A faixa azul de álbum lançado, a mesma dos outros sites (o /destaque.js do
+// fotos). Aqui ela não pode vir do script do fotos — a CSP só aceita a própria
+// origem —, então /api/destaque (functions/api/destaque.js) pergunta ao fotos
+// do lado do servidor e esta função desenha. Tudo por textContent; o link já
+// chega conferido pela função. Fechar esconde por 3 dias neste aparelho, com
+// a mesma chave do script dos outros sites.
+const DESTAQUE_PAUSA_MS = 3 * 864e5;
+let destaqueAtual = null;
+const chaveDestaque = (d) => 'lfc-destaque-fechado:' + d.slug;
+
+function destaqueFechado(d) {
+  try {
+    const t0 = Number(localStorage.getItem(chaveDestaque(d)));
+    return !!t0 && Date.now() - t0 < DESTAQUE_PAUSA_MS;
+  } catch { return false; }
+}
+
+function pintaDestaque() {
+  const el = document.getElementById('destaque');
+  if (!el) return;
+  el.replaceChildren();
+  const d = destaqueAtual;
+  if (!d || destaqueFechado(d)) { el.hidden = true; return; }
+  el.setAttribute('role', 'region');
+  el.setAttribute('aria-label', t('destaque_aria'));
+  const a = document.createElement('a');
+  a.className = 'destaque-link';
+  a.href = d.url;
+  const k = document.createElement('span');
+  k.className = 'destaque-k';
+  k.textContent = d.linha || t('destaque_novo');
+  const tit = document.createElement('span');
+  const b = document.createElement('b');
+  b.textContent = d.titulo;
+  tit.append(b, t('destaque_no_ar'));
+  const ver = document.createElement('span');
+  ver.className = 'destaque-ver';
+  ver.textContent = t('destaque_ver');
+  a.append(k, tit, ver);
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'destaque-x';
+  x.dataset.action = 'destaque-fechar';
+  x.setAttribute('aria-label', t('destaque_fechar'));
+  x.textContent = '×';
+  el.append(a, x);
+  el.hidden = false;
+}
+
+function fechaDestaque() {
+  if (destaqueAtual) { try { localStorage.setItem(chaveDestaque(destaqueAtual), String(Date.now())); } catch { /* sem armazenamento: some só nesta visita */ } }
+  destaqueAtual = null;
+  pintaDestaque();
+}
+
+async function mostraDestaque() {
+  let d = null;
+  try {
+    const r = await fetch('/api/destaque', { headers: { Accept: 'application/json' } });
+    if (r.ok) d = await r.json();
+  } catch { return; }
+  if (!d || d.ativo !== true || typeof d.url !== 'string' || !d.url.startsWith('https://') || typeof d.slug !== 'string' || typeof d.titulo !== 'string') return;
+  destaqueAtual = d;
+  pintaDestaque();
+}
+
 // Um listener só, por delegação (como no fotos): atributo `onclick` no HTML
 // é script inline, e a CSP não aceita. O botão diz o que faz em data-action.
 const ACOES = {
@@ -1265,6 +1335,7 @@ const ACOES = {
   'inscrever-fechar': () => hideSubscribe(),
   checks: (el) => toggleChecks(Number(el.dataset.i)),
   barra: (el) => mostraBarra(el),
+  'destaque-fechar': () => fechaDestaque(),
 };
 document.addEventListener('click', (ev) => {
   const el = ev.target instanceof Element ? ev.target.closest('[data-action]') : null;
@@ -1309,3 +1380,4 @@ renderSkeletons();
 renderThirdPartySkeletons();
 ageTimer = setInterval(updateLastChecked, 30000);
 runChecks();
+mostraDestaque();
