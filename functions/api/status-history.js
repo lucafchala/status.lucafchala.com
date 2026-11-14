@@ -8,6 +8,10 @@
 // The log is written by /api/status inside the block that already detects a
 // change, so it costs one extra KV write per real transition and nothing at all
 // in steady state (KV writes are the account-wide 1k/day free-tier limit).
+// Com o retrato em D1, o log (e o last_status) moram no D1 (#55): um serviço
+// oscilando já não gasta escrita de KV nenhuma.
+
+import { lerEstado } from './retrato.js';
 
 export const HISTORY_KEY = 'history';
 export const HISTORY_WINDOW_MS = 48 * 3600_000; // matches what the dashboard shows
@@ -29,14 +33,17 @@ export function trimHistory(entries, now = Date.now()) {
     .slice(0, HISTORY_MAX);
 }
 
-export async function readHistory(KV) {
-  if (!KV) return [];
+// Com o retrato em D1, o log mora lá (#55); o KV só é lido enquanto o D1
+// ainda não tem a chave (ver lerEstado em retrato.js).
+export async function readHistory(KV, DB = null) {
+  if (!KV && !DB) return [];
   try {
-    const raw = await KV.get(HISTORY_KEY);
+    const raw = await lerEstado(DB, KV, HISTORY_KEY);
     return trimHistory(raw ? JSON.parse(raw) : []);
-  } catch {
+  } catch (e) {
     // A corrupt value must not take the endpoint down with it — an empty log
     // reads as "nothing recorded", which is the safe interpretation.
+    if (DB) console.error('history: leitura falhou', e);
     return [];
   }
 }
@@ -174,8 +181,8 @@ function summarize(entries) {
 }
 
 // Usada também pelo /api/painel. Devolve o objeto, não a Response.
-export async function resumoHistorico(KV) {
-  if (!KV) {
+export async function resumoHistorico(KV, DB = null) {
+  if (!KV && !DB) {
     return {
       available: false,
       detail: 'armazenamento não configurado — histórico não é registrado',
@@ -183,7 +190,7 @@ export async function resumoHistorico(KV) {
     };
   }
 
-  const entries = await readHistory(KV);
+  const entries = await readHistory(KV, DB);
 
   // Flapping is the failure mode a live dashboard hides best: a service that
   // recovers before you look at it reads as healthy every single time.
@@ -206,7 +213,7 @@ export async function resumoHistorico(KV) {
 }
 
 export async function onRequestGet(context) {
-  return json(await resumoHistorico(context.env.STATUS_KV));
+  return json(await resumoHistorico(context.env.STATUS_KV, context.env.STATUS_DB));
 }
 
 function json(data) {

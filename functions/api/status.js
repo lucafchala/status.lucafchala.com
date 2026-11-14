@@ -14,7 +14,7 @@
 // this writer and that reader can never drift apart.
 import { HISTORY_KEY, readHistory, trimHistory } from './status-history.js';
 import { LATENCY_KEY, readLatency, trimLatency, shouldSample, buildSample } from './latency-trends.js';
-import { lerRetrato, tomarVez, gravarVarredura, marcarAgendador, RETRATO_TTL_MS } from './retrato.js';
+import { lerRetrato, tomarVez, gravarVarredura, marcarAgendador, lerEstado, gravarEstado, RETRATO_TTL_MS } from './retrato.js';
 
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
@@ -148,7 +148,9 @@ async function checkContent(label, url, { marker, contentType } = {}) {
     }
     const text = await res.text();
     if (text.length < 50)                 return { label, status: 'degraded', detail: 'resposta vazia' };
-    if (marker && !text.includes(marker)) return { label, status: 'degraded', detail: 'conteúdo esperado ausente' };
+    // Lista: todos têm de estar lá; o detalhe nomeia o primeiro que faltou.
+    const faltando = (Array.isArray(marker) ? marker : marker ? [marker] : []).find((m) => !text.includes(m));
+    if (faltando) return { label, status: 'degraded', detail: Array.isArray(marker) ? `ausente: ${faltando}` : 'conteúdo esperado ausente' };
     return { label, status: 'up', detail: '' };
   } catch (e) {
     return { label, status: 'down', detail: netDetail(e) };
@@ -580,6 +582,42 @@ async function checkXml(label, url, { rootTag } = {}) {
   }
 }
 
+// Galeria pública do fotos (v3) é para ser achada: o /sitemap-galerias.xml tem
+// de ser um índice de sitemaps, e a página não pode sair com
+// `noindex`, nem na meta nem no X-Robots-Tag. Um noindex que escapasse (um
+// cabeçalho genérico, o "em breve" vazando para uma galeria lançada) tiraria
+// as fotos da busca sem nenhum erro na tela. A galeria vem do próprio
+// sitemap-galerias.xml (índice → primeiro sitemap → primeira página), então a
+// sonda não depende de um slug fixo que um dia deixa de existir.
+export async function checkGaleriaIndexavel(label, base) {
+  const loc = (xml) => (xml.match(/<loc>\s*([^<\s]+)\s*<\/loc>/) || [])[1] || null;
+  const mesmaOrigem = (u) => { try { return new URL(u).origin === new URL(base).origin; } catch { return false; } };
+  try {
+    const idx = await fetchSvc(base + '/sitemap-galerias.xml');
+    if (!idx.ok) { idx.body?.cancel(); return { label, status: idx.status >= 500 ? 'down' : 'degraded', detail: `índice HTTP ${idx.status}` }; }
+    const ct = idx.headers.get('content-type') || '';
+    const xml = await idx.text();
+    if (!ct.includes('xml') || !xml.includes('<sitemapindex')) return { label, status: 'degraded', detail: 'sitemap-galerias.xml não é um índice de sitemaps' };
+    const filho = loc(xml);
+    if (!filho) return { label, status: 'unknown', detail: 'nenhuma galeria no índice' };
+    if (!mesmaOrigem(filho)) return { label, status: 'degraded', detail: 'índice aponta para fora do site' };
+    const sm = await fetchSvc(filho);
+    if (!sm.ok) { sm.body?.cancel(); return { label, status: 'degraded', detail: `sitemap da galeria HTTP ${sm.status}` }; }
+    const pagina = loc(await sm.text());
+    if (!pagina || !mesmaOrigem(pagina)) return { label, status: 'degraded', detail: 'sitemap da galeria sem página' };
+    const res = await fetchSvc(pagina);
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
+    if (!res.ok) { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+    if (/noindex/i.test(res.headers.get('x-robots-tag') || '')) { res.body?.cancel(); return { label, status: 'degraded', detail: 'X-Robots-Tag: noindex' }; }
+    const html = await res.text();
+    const meta = html.match(/<meta[^>]+name=["']robots["'][^>]*>/i);
+    if (meta && /noindex/i.test(meta[0])) return { label, status: 'degraded', detail: 'meta robots noindex' };
+    return { label, status: 'up', detail: '' };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
 // RFC 9116 security.txt: must declare a Contact and an Expires still in the
 // future. An expired (or near-expired) file is a compliance regression — catch
 // it before an external scanner does.
@@ -787,6 +825,12 @@ export const SERVICES = [
         },
         // O sitemap sai da lista de eventos (dado, não bundle): toda varredura.
         checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
+        // v3 (#63): índice das galerias + uma galeria sem noindex, numa linha
+        // só. São três requisições (índice, sitemap, página) e o subrequest é
+        // contado (50 por invocação): ritmo das estáticas, porque o que ela
+        // pega de verdade — um noindex, uma rota de sitemap quebrada — vem de
+        // deploy. Uma galeria nova que o índice esqueça não é queda.
+        est('galerias: sitemap e indexação', () => checkGaleriaIndexavel('galerias: sitemap e indexação', b)),
         // /dashboard também é sondado como serviço próprio ("Fotos — Dashboard")
         // a cada varredura; aqui ele entra só no ritmo das estáticas.
         est('painel /dashboard', () => checkAcesso('painel /dashboard', b + '/dashboard')),
@@ -799,7 +843,10 @@ export const SERVICES = [
         })),
         est('ícone PWA', () => checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' })),
         est('og coming-soon', () => checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' })),
-        est('robots.txt', () => checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' })),
+        // O Disallow dos downloads é o que deixa a galeria ser indexada sem o
+        // robô baixar cada original (v3, #63). O Content-Signal não é
+        // conferido: a preferência de treino é escolha do dono e já mudou.
+        est('robots.txt', () => checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: ['Sitemap:', 'Disallow: /galeria/*/baixar/', '/sitemap-galerias.xml'] })),
         // Muda com o tempo (Expires), não com o deploy — mas a margem de aviso
         // é de 14 dias; conferir a cada 3 h sobra.
         est('security.txt (RFC 9116)', () => checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt')),
@@ -1036,7 +1083,7 @@ async function comRetrato(context, DB) {
     const fim = Date.now();
     context.waitUntil(gravarVarredura(DB, payload, origem, fim)
       .catch((e) => console.error('retrato: gravação falhou', e)));
-    context.waitUntil(detectAndNotify(context.env, payload.services, url.origin, { latenciaNoD1: true }));
+    context.waitUntil(detectAndNotify(context.env, payload.services, url.origin, { latenciaNoD1: true, DB }));
     return responder({ ...payload, retrato: { origem, idadeMs: 0, atrasado: false } }, { idadeMs: 0, origem });
   }
 
@@ -1201,7 +1248,10 @@ async function quotaEntries(origin) {
 const OWNER_ONLY_PREFIXES = ['cota · ', 'TLS · '];
 function isOwnerOnlyName(name) { return OWNER_ONLY_PREFIXES.some((p) => name.startsWith(p)); }
 
-export async function detectAndNotify(env, services, origin, { latenciaNoD1 = false } = {}) {
+// `DB` (o retrato em D1): last_status e history moram lá (#55). Sem ele, no KV
+// como sempre. O resto (cooldown, fila de envio) segue no KV: só é escrito
+// quando um e-mail sai ou falha, e o cooldown de 1 h já põe teto nisso.
+export async function detectAndNotify(env, services, origin, { latenciaNoD1 = false, DB = null } = {}) {
   const KV = env.STATUS_KV;
   if (!KV) return;
 
@@ -1209,7 +1259,10 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
 
   let prev = {};
   let prevOk = true;
-  try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; prevOk = false; }
+  try { prev = JSON.parse(await lerEstado(DB, KV, 'last_status') || '{}') || {}; } catch (e) {
+    prev = {}; prevOk = false;
+    if (DB) console.error('last_status: leitura falhou', e);
+  }
   // Só existe depois de uma gravação recusada, e nesse caso o KV está velho de
   // propósito: quem sabe o estado mais recente é o espelho.
   if (_fallback.lastStatus) { prev = { ...prev, ..._fallback.lastStatus }; prevOk = true; }
@@ -1278,17 +1331,17 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
 
   if (changed) {
     try {
-      await KV.put('last_status', JSON.stringify(next));
+      await gravarEstado(DB, KV, 'last_status', JSON.stringify(next));
       // O KV voltou a aceitar escrita: o espelho cumpriu o papel e sai de cena,
       // senão ele mascararia transições futuras com um estado congelado.
       _fallback.lastStatus = null;
     } catch (e) {
       _fallback.lastStatus = next;
-      console.error('last_status write failed (cota de KV?)', e);
+      console.error('last_status write failed (cota de KV ou D1 fora?)', e);
     }
     if (transitions.length) {
-      const log = await readHistory(KV);
-      await KV.put(HISTORY_KEY, JSON.stringify(trimHistory([...transitions, ...log])))
+      const log = await readHistory(KV, DB);
+      await gravarEstado(DB, KV, HISTORY_KEY, JSON.stringify(trimHistory([...transitions, ...log])))
         .catch((e) => console.error('history write failed', e));
     }
   }
@@ -1355,7 +1408,9 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
   const pending = [];
   for (const c of fila) {
     if (!current[c.name] || current[c.name].status !== c.to || transitions.some((t) => t.name === c.name)) continue;
-    if (await emCooldown(c.name, c.to)) continue;
+    // Item com `dest` é a sobra de um envio que saiu em parte: o cooldown já
+    // foi gasto por esse mesmo envio, e checá-lo aqui engoliria a sobra.
+    if (!Array.isArray(c.dest) && await emCooldown(c.name, c.to)) continue;
     pending.push(c);
   }
 
@@ -1372,32 +1427,58 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
     return;
   }
 
-  let ok = false;
-  try { ok = await sendAlerts(env, changes); }
-  catch (e) { console.error('status alert email failed', e); ok = false; }
-
-  if (ok) {
-    for (const c of changes) {
-      const key = cooldownKey(c.name, c.to);
-      try {
-        await KV.put(key, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
-      } catch (e) {
-        console.error('notify cooldown write failed (cota de KV?)', e);
-      }
-      // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto
-      // quando a gravação falhou.
-      _fallback.notifiedAt.set(key, now);
-    }
-    if (fila.length) await writePending(KV, []);
-    return;
+  // Mudanças com o mesmo público vão juntas num e-mail. As novas vão a todos;
+  // a sobra de um envio parcial (#56), só a quem o lote recusado deixou de fora.
+  // Antes a mudança inteira voltava para a fila e a nova tentativa refazia
+  // todos os destinatários: com 150 inscritos e o 2º lote recusado, o dono e
+  // os 99 primeiros recebiam o mesmo alerta duas vezes.
+  const grupos = new Map();
+  for (const c of changes) {
+    const chave = Array.isArray(c.dest) ? JSON.stringify([...c.dest].sort()) : '*';
+    if (!grupos.has(chave)) grupos.set(chave, { soPara: Array.isArray(c.dest) ? new Set(c.dest) : null, itens: [] });
+    grupos.get(chave).itens.push(c);
   }
-  // Falhou: o cooldown não foi gasto, e a transição fica na fila para a
-  // próxima varredura — no máximo MAX_ALERT_ATTEMPTS vezes, para um
-  // destinatário que o Resend recusa sempre não virar e-mail repetido ao dono.
-  const retry = changes
-    .map((c) => ({ ...c, attempts: (c.attempts || 0) + 1 }))
-    .filter((c) => c.attempts < MAX_ALERT_ATTEMPTS);
-  await writePending(KV, retry);
+
+  const retry = [];
+  for (const { soPara, itens } of grupos.values()) {
+    let r;
+    try { r = await sendAlerts(env, itens, soPara); }
+    catch (e) { console.error('status alert email failed', e); r = { enviados: 0, recusados: null }; }
+
+    // Um destinatário aceito já basta para a transição contar como avisada: o
+    // cooldown segura a mesma notícia na hora seguinte, e quem ficou de fora
+    // vai na fila com `dest`.
+    if (r.enviados > 0) {
+      for (const c of itens) {
+        const key = cooldownKey(c.name, c.to);
+        try {
+          await KV.put(key, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+        } catch (e) {
+          console.error('notify cooldown write failed (cota de KV?)', e);
+        }
+        // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto
+        // quando a gravação falhou.
+        _fallback.notifiedAt.set(key, now);
+      }
+    }
+    // Recusados (ou o envio todo, se nem chegou a montar os lotes): ficam na
+    // fila para a próxima varredura — no máximo MAX_ALERT_ATTEMPTS vezes, para
+    // um destinatário que o Resend recusa sempre não virar e-mail repetido.
+    const falta = r.recusados === null ? null : r.recusados;
+    if (falta === null || falta.length) {
+      for (const c of itens) {
+        const attempts = (c.attempts || 0) + 1;
+        if (attempts >= MAX_ALERT_ATTEMPTS) continue;
+        const item = { ...c, attempts };
+        if (falta) item.dest = falta;
+        else if (!Array.isArray(c.dest)) delete item.dest;
+        retry.push(item);
+      }
+    }
+  }
+  // Fila só é gravada quando há o que lembrar ou o que limpar: zero escrita
+  // em estado normal.
+  if (retry.length || fila.length) await writePending(KV, retry);
 }
 
 const MAX_ALERT_ATTEMPTS = 3;
@@ -1426,7 +1507,7 @@ async function writePending(KV, list) {
   }
 }
 
-async function sendAlerts(env, changes) {
+async function sendAlerts(env, changes, soPara = null) {
   const { RESEND_API_KEY, NOTIFY_TO, NOTIFY_FROM = 'status@lucafchala.com', STATUS_KV: KV } = env;
 
   let subscribers = [];
@@ -1437,7 +1518,11 @@ async function sendAlerts(env, changes) {
   // público nesta rodada não recebe e-mail.
   const publicChanges = changes.filter((c) => !c.ownerOnly);
   const subEmails = publicChanges.length ? subscribers.map((s) => s && s.email).filter(Boolean) : [];
-  const recipients = [...new Set([NOTIFY_TO, ...subEmails])];
+  let recipients = [...new Set([NOTIFY_TO, ...subEmails])].filter(Boolean);
+  // Reenvio de um lote recusado: só quem ficou de fora. Quem se descadastrou
+  // nesse meio-tempo cai aqui também, porque não está mais em `subscribers`.
+  if (soPara) recipients = recipients.filter((e) => soPara.has(e));
+  if (!recipients.length) return { enviados: 0, recusados: [] };
   const bySub = new Map(subscribers.filter((s) => s && s.email).map((s) => [s.email, s]));
 
   const ownerMail = buildAlert(changes);
@@ -1470,26 +1555,42 @@ async function sendAlerts(env, changes) {
 
   // O endpoint de lote do Resend aceita no máximo 100 mensagens por chamada;
   // acima disso a chamada inteira era recusada — e ninguém sabia, porque a
-  // resposta não era lida. O dono vai no primeiro lote.
-  let ok = true;
+  // resposta não era lida. O dono vai no primeiro lote. Cada lote responde
+  // por si: quem estava num lote recusado volta como `recusados`, e só esses
+  // são tentados de novo (#56). A pausa entre lotes é porque o motivo mais
+  // provável de recusa é o limite por segundo do Resend, e lotes colados o
+  // estouram.
+  let enviados = 0;
+  const recusados = [];
   for (let i = 0; i < batch.length; i += RESEND_BATCH_MAX) {
-    const res = await fetch('https://api.resend.com/emails/batch', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(batch.slice(i, i + RESEND_BATCH_MAX)),
-    });
-    if (!res.ok) {
-      ok = false;
-      const detail = await res.text().catch(() => '');
-      console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed: HTTP ${res.status}`, detail.slice(0, 300));
-    } else {
+    if (i > 0) await new Promise((r) => setTimeout(r, RESEND_PAUSA_MS));
+    const lote = batch.slice(i, i + RESEND_BATCH_MAX);
+    let res = null;
+    try {
+      res = await fetch('https://api.resend.com/emails/batch', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(lote),
+      });
+    } catch (e) {
+      console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed`, e);
+    }
+    if (res && res.ok) {
       res.body?.cancel();
+      enviados += lote.length;
+    } else {
+      if (res) {
+        const detail = await res.text().catch(() => '');
+        console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed: HTTP ${res.status}`, detail.slice(0, 300));
+      }
+      for (const m of lote) recusados.push(m.to[0]);
     }
   }
-  return ok;
+  return { enviados, recusados };
 }
 
 const RESEND_BATCH_MAX = 100;
+const RESEND_PAUSA_MS = 600;
 
 function buildAlert(changes) {
   // Worst-first: when several services change at once the mail already batches
