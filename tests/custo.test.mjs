@@ -49,7 +49,9 @@ function mundo(versaoId = 'v1', { dominio403 = false } = {}) {
     if (url.pathname.endsWith('/data.json')) return json({ redirects: [{ createdAt: '2026-09-01' }] });
     if (url.pathname === '/pastes.json') return json({ pastes: [{ createdAt: '2026-09-01' }] });
     if (url.pathname === '/.well-known/security.txt') return new Response('Contact: mailto:a@b.co\nExpires: 2030-01-01T00:00:00Z\n');
-    if (url.pathname === '/robots.txt') return new Response('Sitemap: x '.repeat(10), { headers: { 'content-type': 'text/plain' } });
+    if (url.pathname === '/robots.txt') return new Response('Disallow: /galeria/*/baixar/\nSitemap: https://fotos.lucafchala.com/sitemap-galerias.xml\n'.repeat(2), { headers: { 'content-type': 'text/plain' } });
+    if (url.pathname === '/sitemap-galerias.xml') return new Response(`<?xml version="1.0"?><sitemapindex><sitemap><loc>https://${url.host}/sitemap-galeria-festa.xml</loc></sitemap></sitemapindex>`, { headers: { 'content-type': 'application/xml' } });
+    if (url.pathname === '/sitemap-galeria-festa.xml') return new Response(`<?xml version="1.0"?><urlset><url><loc>https://${url.host}/galeria/festa</loc></url></urlset>`, { headers: { 'content-type': 'application/xml' } });
     if (url.pathname === '/icon.svg') return html('image/svg+xml');
     if (url.pathname === '/og-coming-soon.png') return html('image/png');
     if (url.pathname === '/__status_probe_404__') return new Response('', { status: 404 });
@@ -69,10 +71,10 @@ function mundo(versaoId = 'v1', { dominio403 = false } = {}) {
 const fotosDe = (payload) => payload.services.find((s) => s.name === 'Fotos');
 
 describe('custo de uma varredura', () => {
-  test('primeira varredura: 17 requisições no fotos (tudo conferido)', async () => {
+  test('primeira varredura: 20 requisições no fotos (tudo conferido)', async () => {
     const m = mundo();
     const p = await status.varrer({});
-    assert.equal(m.fotos(), 17);
+    assert.equal(m.fotos(), 20);
     assert.equal(fotosDe(p).status, 'up', JSON.stringify(fotosDe(p).problems));
   });
 
@@ -95,7 +97,7 @@ describe('custo de uma varredura', () => {
     const p1 = await status.varrer({});
     const m = mundo('v2');
     await status.varrer({}, p1);
-    assert.equal(m.fotos(), 17);
+    assert.equal(m.fotos(), 20);
   });
 
   test('sem versão no healthz (binding ausente, healthz antigo): nada é reaproveitado', async () => {
@@ -103,7 +105,7 @@ describe('custo de uma varredura', () => {
     const p1 = await status.varrer({});
     const m = mundo(null);
     await status.varrer({}, p1);
-    assert.equal(m.fotos(), 17);
+    assert.equal(m.fotos(), 20);
   });
 
   test('linha estática que falhou é reconferida na varredura seguinte', async () => {
@@ -143,10 +145,11 @@ describe('custo de uma varredura', () => {
     assert.equal(m.para('fotos.lucafchala.com/api/healthz'), 0);
   });
 
-  test('subrequests por varredura, no total: 38 → 24 depois da primeira', async () => {
-    mundo();
-    const p1 = await status.varrer({});
+  test('subrequests por varredura, no total: 41 → 24 depois da primeira (teto do Workers: 50)', async () => {
     const m = mundo();
+    const p1 = await status.varrer({});
+    assert.ok(m.idas.length <= 41, `primeira: ${m.idas.length} fetch`);
+    m.idas.length = 0;
     await status.varrer({}, p1);
     assert.ok(m.idas.length <= 24, `${m.idas.length} fetch`);
   });

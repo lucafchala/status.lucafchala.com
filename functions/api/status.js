@@ -148,7 +148,9 @@ async function checkContent(label, url, { marker, contentType } = {}) {
     }
     const text = await res.text();
     if (text.length < 50)                 return { label, status: 'degraded', detail: 'resposta vazia' };
-    if (marker && !text.includes(marker)) return { label, status: 'degraded', detail: 'conteúdo esperado ausente' };
+    // Lista: todos têm de estar lá; o detalhe nomeia o primeiro que faltou.
+    const faltando = (Array.isArray(marker) ? marker : marker ? [marker] : []).find((m) => !text.includes(m));
+    if (faltando) return { label, status: 'degraded', detail: Array.isArray(marker) ? `ausente: ${faltando}` : 'conteúdo esperado ausente' };
     return { label, status: 'up', detail: '' };
   } catch (e) {
     return { label, status: 'down', detail: netDetail(e) };
@@ -580,6 +582,42 @@ async function checkXml(label, url, { rootTag } = {}) {
   }
 }
 
+// Galeria pública do fotos (v3) é para ser achada: o /sitemap-galerias.xml tem
+// de ser um índice de sitemaps, e a página não pode sair com
+// `noindex`, nem na meta nem no X-Robots-Tag. Um noindex que escapasse (um
+// cabeçalho genérico, o "em breve" vazando para uma galeria lançada) tiraria
+// as fotos da busca sem nenhum erro na tela. A galeria vem do próprio
+// sitemap-galerias.xml (índice → primeiro sitemap → primeira página), então a
+// sonda não depende de um slug fixo que um dia deixa de existir.
+export async function checkGaleriaIndexavel(label, base) {
+  const loc = (xml) => (xml.match(/<loc>\s*([^<\s]+)\s*<\/loc>/) || [])[1] || null;
+  const mesmaOrigem = (u) => { try { return new URL(u).origin === new URL(base).origin; } catch { return false; } };
+  try {
+    const idx = await fetchSvc(base + '/sitemap-galerias.xml');
+    if (!idx.ok) { idx.body?.cancel(); return { label, status: idx.status >= 500 ? 'down' : 'degraded', detail: `índice HTTP ${idx.status}` }; }
+    const ct = idx.headers.get('content-type') || '';
+    const xml = await idx.text();
+    if (!ct.includes('xml') || !xml.includes('<sitemapindex')) return { label, status: 'degraded', detail: 'sitemap-galerias.xml não é um índice de sitemaps' };
+    const filho = loc(xml);
+    if (!filho) return { label, status: 'unknown', detail: 'nenhuma galeria no índice' };
+    if (!mesmaOrigem(filho)) return { label, status: 'degraded', detail: 'índice aponta para fora do site' };
+    const sm = await fetchSvc(filho);
+    if (!sm.ok) { sm.body?.cancel(); return { label, status: 'degraded', detail: `sitemap da galeria HTTP ${sm.status}` }; }
+    const pagina = loc(await sm.text());
+    if (!pagina || !mesmaOrigem(pagina)) return { label, status: 'degraded', detail: 'sitemap da galeria sem página' };
+    const res = await fetchSvc(pagina);
+    if (res.status >= 500) { res.body?.cancel(); return { label, status: 'down', detail: `HTTP ${res.status}` }; }
+    if (!res.ok) { res.body?.cancel(); return { label, status: 'degraded', detail: `HTTP ${res.status}` }; }
+    if (/noindex/i.test(res.headers.get('x-robots-tag') || '')) { res.body?.cancel(); return { label, status: 'degraded', detail: 'X-Robots-Tag: noindex' }; }
+    const html = await res.text();
+    const meta = html.match(/<meta[^>]+name=["']robots["'][^>]*>/i);
+    if (meta && /noindex/i.test(meta[0])) return { label, status: 'degraded', detail: 'meta robots noindex' };
+    return { label, status: 'up', detail: '' };
+  } catch (e) {
+    return { label, status: 'down', detail: netDetail(e) };
+  }
+}
+
 // RFC 9116 security.txt: must declare a Contact and an Expires still in the
 // future. An expired (or near-expired) file is a compliance regression — catch
 // it before an external scanner does.
@@ -787,6 +825,12 @@ export const SERVICES = [
         },
         // O sitemap sai da lista de eventos (dado, não bundle): toda varredura.
         checkXml('sitemap.xml', b + '/sitemap.xml', { rootTag: '<urlset' }),
+        // v3 (#63): índice das galerias + uma galeria sem noindex, numa linha
+        // só. São três requisições (índice, sitemap, página) e o subrequest é
+        // contado (50 por invocação): ritmo das estáticas, porque o que ela
+        // pega de verdade — um noindex, uma rota de sitemap quebrada — vem de
+        // deploy. Uma galeria nova que o índice esqueça não é queda.
+        est('galerias: sitemap e indexação', () => checkGaleriaIndexavel('galerias: sitemap e indexação', b)),
         // /dashboard também é sondado como serviço próprio ("Fotos — Dashboard")
         // a cada varredura; aqui ele entra só no ritmo das estáticas.
         est('painel /dashboard', () => checkAcesso('painel /dashboard', b + '/dashboard')),
@@ -799,7 +843,10 @@ export const SERVICES = [
         })),
         est('ícone PWA', () => checkContent('ícone PWA', b + '/icon.svg', { contentType: 'image/svg+xml', marker: '<svg' })),
         est('og coming-soon', () => checkContent('og coming-soon', b + '/og-coming-soon.png', { contentType: 'image/png' })),
-        est('robots.txt', () => checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: 'Sitemap:' })),
+        // O Disallow dos downloads é o que deixa a galeria ser indexada sem o
+        // robô baixar cada original (v3, #63). O Content-Signal não é
+        // conferido: a preferência de treino é escolha do dono e já mudou.
+        est('robots.txt', () => checkContent('robots.txt', b + '/robots.txt', { contentType: 'text/plain', marker: ['Sitemap:', 'Disallow: /galeria/*/baixar/', '/sitemap-galerias.xml'] })),
         // Muda com o tempo (Expires), não com o deploy — mas a margem de aviso
         // é de 14 dias; conferir a cada 3 h sobra.
         est('security.txt (RFC 9116)', () => checkSecurityTxt('security.txt (RFC 9116)', b + '/.well-known/security.txt')),

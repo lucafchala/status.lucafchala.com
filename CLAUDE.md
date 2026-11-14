@@ -16,7 +16,7 @@ The ecosystem's status page: a static page plus Cloudflare Pages Functions that 
 | `functions/api/third-party-status.js`, `quota-stats.js`, `status-history.js`, `latency-trends.js`, `healthz.js` | The other sections |
 | `agendador/` | Cron Worker that requests a sweep every 10 min |
 | `scripts/vigia.mjs` + `.github/workflows/monitor.yml` | Watchdog outside Cloudflare |
-| `tests/*.test.mjs` | `node --test tests/*.test.mjs` — no package.json, no deps. `regua.test.mjs` pins the three rulers that fail silently: the day bar's colour, fotos' `/dashboard` behind Cloudflare Access, and Cloudflare‑Brazil (GRU rules) |
+| `tests/*.test.mjs` | `node --test tests/*.test.mjs` — no package.json, no deps. `monitor.test.mjs` also pins fotos v3: galleries without `noindex` (`checkGaleriaIndexavel`). `regua.test.mjs` pins the three rulers that fail silently: the day bar's colour, fotos' `/dashboard` behind Cloudflare Access, and Cloudflare‑Brazil (GRU rules) |
 
 ## Rules
 

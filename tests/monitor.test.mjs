@@ -198,3 +198,58 @@ describe('certificado que o token não consegue ler', () => {
     assert.equal(kv.writesOf('last_status'), 0);
   });
 });
+
+// #63: as rotas do fotos v3. Um noindex numa galeria pública, ou o Disallow dos
+// downloads sumindo do robots, não derrubam nada — só tiram as fotos da busca
+// (ou deixam o robô baixar cada original). Falha calada: tem teste.
+describe('fotos v3: galerias indexáveis e robots', () => {
+  const B = 'https://fotos.lucafchala.com';
+  const salvo = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = salvo; });
+  const xml = (corpo) => new Response(`<?xml version="1.0"?>${corpo}`, { headers: { 'content-type': 'application/xml' } });
+  function site({ meta = 'index,follow', xrobots = null, indice = null } = {}) {
+    globalThis.fetch = async (input) => {
+      const u = new URL(String(input?.url || input));
+      if (u.pathname === '/sitemap-galerias.xml') return indice ? indice() : xml(`<sitemapindex><sitemap><loc>${B}/sitemap-galeria-a.xml</loc></sitemap></sitemapindex>`);
+      if (u.pathname === '/sitemap-galeria-a.xml') return xml(`<urlset><url><loc>${B}/galeria/a</loc></url></urlset>`);
+      if (u.pathname === '/galeria/a') {
+        const h = { 'content-type': 'text/html' };
+        if (xrobots) h['x-robots-tag'] = xrobots;
+        return new Response(`<html><head><meta name="robots" content="${meta}"></head><body>${'x'.repeat(80)}</body></html>`, { headers: h });
+      }
+      return new Response('nada', { status: 404 });
+    };
+  }
+  const L = 'galerias: sitemap e indexação';
+
+  test('galeria sem noindex: verde', async () => {
+    site();
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'up');
+  });
+  test('meta robots noindex na galeria: degradado', async () => {
+    site({ meta: 'noindex,follow' });
+    const r = await status.checkGaleriaIndexavel(L, B);
+    assert.equal(r.status, 'degraded');
+    assert.match(r.detail, /noindex/);
+  });
+  test('X-Robots-Tag noindex na galeria: degradado', async () => {
+    site({ xrobots: 'noindex' });
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'degraded');
+  });
+  test('o índice não é sitemapindex: degradado', async () => {
+    site({ indice: () => xml('<urlset></urlset>') });
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'degraded');
+  });
+  test('índice apontando para fora do site: não segue', async () => {
+    let foiFora = false;
+    site({ indice: () => xml('<sitemapindex><sitemap><loc>https://mal.example/x.xml</loc></sitemap></sitemapindex>') });
+    const f = globalThis.fetch;
+    globalThis.fetch = async (i, o) => { if (String(i?.url || i).includes('mal.example')) foiFora = true; return f(i, o); };
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'degraded');
+    assert.equal(foiFora, false);
+  });
+  test('índice vazio: desconhecido, não verde nem vermelho', async () => {
+    site({ indice: () => xml('<sitemapindex></sitemapindex>') });
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'unknown');
+  });
+});
