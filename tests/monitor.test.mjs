@@ -16,6 +16,8 @@ import assert from 'node:assert/strict';
 const status = await import('../functions/api/status.js');
 const latency = await import('../functions/api/latency-trends.js');
 const quota = await import('../functions/api/quota-stats.js');
+const historico = await import('../functions/api/status-history.js');
+const { d1Sqlite } = await import('./d1.mjs');
 
 /** KV em memória que conta escrita por chave. */
 function fakeKV(initial = {}) {
@@ -142,6 +144,57 @@ describe('custo da varredura em escrita de KV', () => {
       advance(3 * 3600_000 + 13 * 60_000);
     }
     assert.equal(kv.writesOf(latency.LATENCY_KEY), 6);
+  });
+});
+
+// #55: um serviço que alterna up/degraded (resposta lenta perto do limite)
+// gravava last_status + history no KV a CADA varredura: 290 escritas em 24 h
+// no ritmo do agendador, ~720 no piso de 4 min, de uma cota de 1000/dia que a
+// conta divide com o fotos. Com o retrato em D1, os dois moram lá.
+describe('serviço oscilando (#55)', () => {
+  const lenta = (st) => [{ ...SWEEP[0], status: st, rt: st === 'up' ? 250 : 2500 }, SWEEP[1]];
+
+  test('com o D1: 144 varreduras alternando custam zero escrita de KV, e nada se perde', async () => {
+    quotaNaoConfigurada();
+    const kv = fakeKV({ last_status: JSON.stringify({ Fotos: 'up', Treino: 'up' }) });
+    const DB = d1Sqlite();
+    setClock('2026-09-24T00:00:10Z');
+    for (let i = 0; i < 144; i++) {
+      await status.detectAndNotify({ STATUS_KV: kv }, lenta(i % 2 ? 'up' : 'degraded'), 'https://status.lucafchala.com', { latenciaNoD1: true, DB });
+      advance(10 * 60_000);
+    }
+    assert.equal([...kv.writes.values()].reduce((a, b) => a + b, 0), 0, `escritas de KV: ${JSON.stringify([...kv.writes])}`);
+    // O estado e o log estão no D1: a última varredura foi 'up', e o log
+    // guarda as transições mais recentes até o teto dele.
+    const atual = JSON.parse(DB.sqlite.prepare("SELECT valor FROM estado WHERE chave = 'last_status'").get().valor);
+    assert.equal(atual.Fotos, 'up');
+    const log = await historico.readHistory(kv, DB);
+    assert.equal(log.filter((e) => e.name === 'Fotos').length, historico.HISTORY_MAX);
+    // E o /api/painel lê o mesmo log.
+    const resumo = await historico.resumoHistorico(kv, DB);
+    assert.ok(resumo.flapping.some((f) => f.name === 'Fotos'), 'oscilação aparece no painel');
+  });
+
+  test('primeira varredura depois do deploy: o estado antigo do KV vale (sem alerta perdido nem log apagado)', async () => {
+    quotaNaoConfigurada();
+    const antigo = [{ name: 'Treino', from: 'up', to: 'down', at: '2026-09-23T23:00:00Z', severity: 'critico', problems: [] }];
+    const kv = fakeKV({ last_status: JSON.stringify({ Fotos: 'up', Treino: 'down' }), history: JSON.stringify(antigo) });
+    const DB = d1Sqlite();
+    setClock('2026-09-24T00:00:10Z');
+    // Treino segue fora (sem transição) e Fotos cai (transição a partir do 'up' do KV).
+    await status.detectAndNotify({ STATUS_KV: kv }, [{ ...SWEEP[0], status: 'down' }, { ...SWEEP[1], status: 'down' }], 'https://status.lucafchala.com', { latenciaNoD1: true, DB });
+    const log = await historico.readHistory(kv, DB);
+    assert.deepEqual(log.map((e) => `${e.name}:${e.from}>${e.to}`), ['Fotos:up>down', 'Treino:up>down']);
+    assert.equal(kv.writesOf('last_status') + kv.writesOf('history'), 0);
+  });
+
+  test('sem o D1: o comportamento de antes (KV), para instalação sem STATUS_DB', async () => {
+    quotaNaoConfigurada();
+    const kv = fakeKV({ last_status: JSON.stringify({ Fotos: 'up', Treino: 'up' }) });
+    setClock('2026-09-24T00:00:10Z');
+    await status.detectAndNotify({ STATUS_KV: kv }, lenta('degraded'), 'https://status.lucafchala.com');
+    assert.equal(kv.writesOf('last_status'), 1);
+    assert.equal(kv.writesOf('history'), 1);
   });
 });
 

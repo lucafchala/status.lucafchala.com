@@ -73,6 +73,11 @@ const ESQUEMA = [
   // uso depois do deploy (cada isolate novo roda o esquema uma vez), sem
   // migração à mão — o mesmo caminho por que as outras nasceram.
   'CREATE TABLE IF NOT EXISTS marca (nome TEXT PRIMARY KEY, valor INTEGER NOT NULL)',
+  // O estado anterior dos serviços (`last_status`) e o log de transições
+  // (`history`), #55. No KV, um serviço oscilando entre up e degraded gravava
+  // os dois a cada varredura: até ~720 escritas/dia de uma cota de 1000 que a
+  // conta inteira divide com o fotos. No D1, escrita é farta (100 mil/dia).
+  'CREATE TABLE IF NOT EXISTS estado (chave TEXT PRIMARY KEY, valor TEXT NOT NULL)',
 ];
 
 // Por isolate: depois da primeira vez, nenhuma consulta a mais por pedido.
@@ -81,6 +86,33 @@ export async function garantirEsquema(DB) {
   if (_esquemaPronto === DB) return;
   await DB.batch(ESQUEMA.map((sql) => DB.prepare(sql)));
   _esquemaPronto = DB;
+}
+
+// Estado de alerta no D1 (#55). Chave sem linha no D1 ainda cai no KV: é a
+// migração. Na primeira varredura depois do deploy, o `last_status` e o
+// `history` antigos são LIDOS do KV (leitura é farta) e a primeira mudança já
+// grava no D1. Sem isso, o D1 vazio passaria por "instalação nova": nenhum
+// alerta para o que já estava quebrado e o log das últimas 48 h sumiria.
+export async function lerEstado(DB, KV, chave) {
+  if (DB) {
+    await garantirEsquema(DB);
+    const row = await DB.prepare('SELECT valor FROM estado WHERE chave = ?').bind(chave).first();
+    if (row) return row.valor;
+  }
+  return KV ? KV.get(chave) : null;
+}
+
+// Com o D1, grava SÓ nele. Falhou, propaga: quem chama já tem o espelho em
+// memória para gravação recusada (o mesmo caminho da cota de KV estourada).
+// Cair para o KV aqui deixaria o D1 velho mascarando o valor novo.
+export async function gravarEstado(DB, KV, chave, valor) {
+  if (DB) {
+    await garantirEsquema(DB);
+    await DB.prepare('INSERT INTO estado (chave, valor) VALUES (?, ?) ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor')
+      .bind(chave, valor).run();
+    return;
+  }
+  await KV.put(chave, valor);
 }
 
 // A vez de varrer. `UPDATE … WHERE ate <= agora` é atômico no D1 (SQLite com

@@ -14,7 +14,7 @@
 // this writer and that reader can never drift apart.
 import { HISTORY_KEY, readHistory, trimHistory } from './status-history.js';
 import { LATENCY_KEY, readLatency, trimLatency, shouldSample, buildSample } from './latency-trends.js';
-import { lerRetrato, tomarVez, gravarVarredura, marcarAgendador, RETRATO_TTL_MS } from './retrato.js';
+import { lerRetrato, tomarVez, gravarVarredura, marcarAgendador, lerEstado, gravarEstado, RETRATO_TTL_MS } from './retrato.js';
 
 const TIMEOUT_MS  = 10000;
 const DEGRADED_MS = 2500;
@@ -1083,7 +1083,7 @@ async function comRetrato(context, DB) {
     const fim = Date.now();
     context.waitUntil(gravarVarredura(DB, payload, origem, fim)
       .catch((e) => console.error('retrato: gravação falhou', e)));
-    context.waitUntil(detectAndNotify(context.env, payload.services, url.origin, { latenciaNoD1: true }));
+    context.waitUntil(detectAndNotify(context.env, payload.services, url.origin, { latenciaNoD1: true, DB }));
     return responder({ ...payload, retrato: { origem, idadeMs: 0, atrasado: false } }, { idadeMs: 0, origem });
   }
 
@@ -1248,7 +1248,10 @@ async function quotaEntries(origin) {
 const OWNER_ONLY_PREFIXES = ['cota · ', 'TLS · '];
 function isOwnerOnlyName(name) { return OWNER_ONLY_PREFIXES.some((p) => name.startsWith(p)); }
 
-export async function detectAndNotify(env, services, origin, { latenciaNoD1 = false } = {}) {
+// `DB` (o retrato em D1): last_status e history moram lá (#55). Sem ele, no KV
+// como sempre. O resto (cooldown, fila de envio) segue no KV: só é escrito
+// quando um e-mail sai ou falha, e o cooldown de 1 h já põe teto nisso.
+export async function detectAndNotify(env, services, origin, { latenciaNoD1 = false, DB = null } = {}) {
   const KV = env.STATUS_KV;
   if (!KV) return;
 
@@ -1256,7 +1259,10 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
 
   let prev = {};
   let prevOk = true;
-  try { prev = JSON.parse(await KV.get('last_status') || '{}') || {}; } catch { prev = {}; prevOk = false; }
+  try { prev = JSON.parse(await lerEstado(DB, KV, 'last_status') || '{}') || {}; } catch (e) {
+    prev = {}; prevOk = false;
+    if (DB) console.error('last_status: leitura falhou', e);
+  }
   // Só existe depois de uma gravação recusada, e nesse caso o KV está velho de
   // propósito: quem sabe o estado mais recente é o espelho.
   if (_fallback.lastStatus) { prev = { ...prev, ..._fallback.lastStatus }; prevOk = true; }
@@ -1325,17 +1331,17 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
 
   if (changed) {
     try {
-      await KV.put('last_status', JSON.stringify(next));
+      await gravarEstado(DB, KV, 'last_status', JSON.stringify(next));
       // O KV voltou a aceitar escrita: o espelho cumpriu o papel e sai de cena,
       // senão ele mascararia transições futuras com um estado congelado.
       _fallback.lastStatus = null;
     } catch (e) {
       _fallback.lastStatus = next;
-      console.error('last_status write failed (cota de KV?)', e);
+      console.error('last_status write failed (cota de KV ou D1 fora?)', e);
     }
     if (transitions.length) {
-      const log = await readHistory(KV);
-      await KV.put(HISTORY_KEY, JSON.stringify(trimHistory([...transitions, ...log])))
+      const log = await readHistory(KV, DB);
+      await gravarEstado(DB, KV, HISTORY_KEY, JSON.stringify(trimHistory([...transitions, ...log])))
         .catch((e) => console.error('history write failed', e));
     }
   }
