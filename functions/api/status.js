@@ -1355,7 +1355,9 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
   const pending = [];
   for (const c of fila) {
     if (!current[c.name] || current[c.name].status !== c.to || transitions.some((t) => t.name === c.name)) continue;
-    if (await emCooldown(c.name, c.to)) continue;
+    // Item com `dest` é a sobra de um envio que saiu em parte: o cooldown já
+    // foi gasto por esse mesmo envio, e checá-lo aqui engoliria a sobra.
+    if (!Array.isArray(c.dest) && await emCooldown(c.name, c.to)) continue;
     pending.push(c);
   }
 
@@ -1372,32 +1374,58 @@ export async function detectAndNotify(env, services, origin, { latenciaNoD1 = fa
     return;
   }
 
-  let ok = false;
-  try { ok = await sendAlerts(env, changes); }
-  catch (e) { console.error('status alert email failed', e); ok = false; }
-
-  if (ok) {
-    for (const c of changes) {
-      const key = cooldownKey(c.name, c.to);
-      try {
-        await KV.put(key, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
-      } catch (e) {
-        console.error('notify cooldown write failed (cota de KV?)', e);
-      }
-      // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto
-      // quando a gravação falhou.
-      _fallback.notifiedAt.set(key, now);
-    }
-    if (fila.length) await writePending(KV, []);
-    return;
+  // Mudanças com o mesmo público vão juntas num e-mail. As novas vão a todos;
+  // a sobra de um envio parcial (#56), só a quem o lote recusado deixou de fora.
+  // Antes a mudança inteira voltava para a fila e a nova tentativa refazia
+  // todos os destinatários: com 150 inscritos e o 2º lote recusado, o dono e
+  // os 99 primeiros recebiam o mesmo alerta duas vezes.
+  const grupos = new Map();
+  for (const c of changes) {
+    const chave = Array.isArray(c.dest) ? JSON.stringify([...c.dest].sort()) : '*';
+    if (!grupos.has(chave)) grupos.set(chave, { soPara: Array.isArray(c.dest) ? new Set(c.dest) : null, itens: [] });
+    grupos.get(chave).itens.push(c);
   }
-  // Falhou: o cooldown não foi gasto, e a transição fica na fila para a
-  // próxima varredura — no máximo MAX_ALERT_ATTEMPTS vezes, para um
-  // destinatário que o Resend recusa sempre não virar e-mail repetido ao dono.
-  const retry = changes
-    .map((c) => ({ ...c, attempts: (c.attempts || 0) + 1 }))
-    .filter((c) => c.attempts < MAX_ALERT_ATTEMPTS);
-  await writePending(KV, retry);
+
+  const retry = [];
+  for (const { soPara, itens } of grupos.values()) {
+    let r;
+    try { r = await sendAlerts(env, itens, soPara); }
+    catch (e) { console.error('status alert email failed', e); r = { enviados: 0, recusados: null }; }
+
+    // Um destinatário aceito já basta para a transição contar como avisada: o
+    // cooldown segura a mesma notícia na hora seguinte, e quem ficou de fora
+    // vai na fila com `dest`.
+    if (r.enviados > 0) {
+      for (const c of itens) {
+        const key = cooldownKey(c.name, c.to);
+        try {
+          await KV.put(key, '1', { expirationTtl: NOTIFY_COOLDOWN_S });
+        } catch (e) {
+          console.error('notify cooldown write failed (cota de KV?)', e);
+        }
+        // Marcado sempre, tenha o KV aceitado ou não: é o que segura o teto
+        // quando a gravação falhou.
+        _fallback.notifiedAt.set(key, now);
+      }
+    }
+    // Recusados (ou o envio todo, se nem chegou a montar os lotes): ficam na
+    // fila para a próxima varredura — no máximo MAX_ALERT_ATTEMPTS vezes, para
+    // um destinatário que o Resend recusa sempre não virar e-mail repetido.
+    const falta = r.recusados === null ? null : r.recusados;
+    if (falta === null || falta.length) {
+      for (const c of itens) {
+        const attempts = (c.attempts || 0) + 1;
+        if (attempts >= MAX_ALERT_ATTEMPTS) continue;
+        const item = { ...c, attempts };
+        if (falta) item.dest = falta;
+        else if (!Array.isArray(c.dest)) delete item.dest;
+        retry.push(item);
+      }
+    }
+  }
+  // Fila só é gravada quando há o que lembrar ou o que limpar: zero escrita
+  // em estado normal.
+  if (retry.length || fila.length) await writePending(KV, retry);
 }
 
 const MAX_ALERT_ATTEMPTS = 3;
@@ -1426,7 +1454,7 @@ async function writePending(KV, list) {
   }
 }
 
-async function sendAlerts(env, changes) {
+async function sendAlerts(env, changes, soPara = null) {
   const { RESEND_API_KEY, NOTIFY_TO, NOTIFY_FROM = 'status@lucafchala.com', STATUS_KV: KV } = env;
 
   let subscribers = [];
@@ -1437,7 +1465,11 @@ async function sendAlerts(env, changes) {
   // público nesta rodada não recebe e-mail.
   const publicChanges = changes.filter((c) => !c.ownerOnly);
   const subEmails = publicChanges.length ? subscribers.map((s) => s && s.email).filter(Boolean) : [];
-  const recipients = [...new Set([NOTIFY_TO, ...subEmails])];
+  let recipients = [...new Set([NOTIFY_TO, ...subEmails])].filter(Boolean);
+  // Reenvio de um lote recusado: só quem ficou de fora. Quem se descadastrou
+  // nesse meio-tempo cai aqui também, porque não está mais em `subscribers`.
+  if (soPara) recipients = recipients.filter((e) => soPara.has(e));
+  if (!recipients.length) return { enviados: 0, recusados: [] };
   const bySub = new Map(subscribers.filter((s) => s && s.email).map((s) => [s.email, s]));
 
   const ownerMail = buildAlert(changes);
@@ -1470,26 +1502,42 @@ async function sendAlerts(env, changes) {
 
   // O endpoint de lote do Resend aceita no máximo 100 mensagens por chamada;
   // acima disso a chamada inteira era recusada — e ninguém sabia, porque a
-  // resposta não era lida. O dono vai no primeiro lote.
-  let ok = true;
+  // resposta não era lida. O dono vai no primeiro lote. Cada lote responde
+  // por si: quem estava num lote recusado volta como `recusados`, e só esses
+  // são tentados de novo (#56). A pausa entre lotes é porque o motivo mais
+  // provável de recusa é o limite por segundo do Resend, e lotes colados o
+  // estouram.
+  let enviados = 0;
+  const recusados = [];
   for (let i = 0; i < batch.length; i += RESEND_BATCH_MAX) {
-    const res = await fetch('https://api.resend.com/emails/batch', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(batch.slice(i, i + RESEND_BATCH_MAX)),
-    });
-    if (!res.ok) {
-      ok = false;
-      const detail = await res.text().catch(() => '');
-      console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed: HTTP ${res.status}`, detail.slice(0, 300));
-    } else {
+    if (i > 0) await new Promise((r) => setTimeout(r, RESEND_PAUSA_MS));
+    const lote = batch.slice(i, i + RESEND_BATCH_MAX);
+    let res = null;
+    try {
+      res = await fetch('https://api.resend.com/emails/batch', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(lote),
+      });
+    } catch (e) {
+      console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed`, e);
+    }
+    if (res && res.ok) {
       res.body?.cancel();
+      enviados += lote.length;
+    } else {
+      if (res) {
+        const detail = await res.text().catch(() => '');
+        console.error(`status alert batch ${i / RESEND_BATCH_MAX + 1} failed: HTTP ${res.status}`, detail.slice(0, 300));
+      }
+      for (const m of lote) recusados.push(m.to[0]);
     }
   }
-  return ok;
+  return { enviados, recusados };
 }
 
 const RESEND_BATCH_MAX = 100;
+const RESEND_PAUSA_MS = 600;
 
 function buildAlert(changes) {
   // Worst-first: when several services change at once the mail already batches

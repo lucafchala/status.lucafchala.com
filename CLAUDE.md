@@ -25,8 +25,8 @@ The ecosystem's status page: a static page plus Cloudflare Pages Functions that 
 - **KV writes are the scarce resource** (1k/day, shared account-wide with fotos). Steady state must cost zero writes: `last_status` only on a real change, `alert_pending` only on a failed send, latency at most every ~30 min. `tests/monitor.test.mjs` counts writes.
 - **Alerts:**
   - cooldown key `notify_sent:{name}:{to}`;
-  - the cooldown is written only after Resend accepts the batch;
-  - batches of ≤ 100;
+  - the cooldown is written only after Resend accepts at least one batch;
+  - batches of ≤ 100, spaced ~600 ms apart; a refused batch is retried for **its recipients only** (`dest` in `alert_pending`), never the whole list — `tests/alertas.test.mjs` (#56);
   - `cota ·` / `TLS ·` rows go only to `NOTIFY_TO`;
   - never let a client request shape an email.
 - **Public endpoints don't leak internals.** No binding names or subscriber counts in `/api/status`, `/api/healthz` (detail only with `X-Status-Token` = `STATUS_ADMIN_TOKEN`) or `/api/subscribe` errors. Raw upstream errors go to `console.error`.
