@@ -145,13 +145,13 @@ describe('custo de uma varredura', () => {
     assert.equal(m.para('fotos.lucafchala.com/api/healthz'), 0);
   });
 
-  test('subrequests por varredura, no total: 41 → 24 depois da primeira (teto do Workers: 50)', async () => {
+  test('subrequests por varredura, no total: 42 → 25 depois da primeira (entrenos2026.com: +1; teto do Workers: 50)', async () => {
     const m = mundo();
     const p1 = await status.varrer({});
-    assert.ok(m.idas.length <= 41, `primeira: ${m.idas.length} fetch`);
+    assert.ok(m.idas.length <= 42, `primeira: ${m.idas.length} fetch`);
     m.idas.length = 0;
     await status.varrer({}, p1);
-    assert.ok(m.idas.length <= 24, `${m.idas.length} fetch`);
+    assert.ok(m.idas.length <= 25, `${m.idas.length} fetch`);
   });
 });
 
