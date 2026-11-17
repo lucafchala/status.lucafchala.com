@@ -16,6 +16,8 @@ import assert from 'node:assert/strict';
 const status = await import('../functions/api/status.js');
 const latency = await import('../functions/api/latency-trends.js');
 const quota = await import('../functions/api/quota-stats.js');
+const historico = await import('../functions/api/status-history.js');
+const { d1Sqlite } = await import('./d1.mjs');
 
 /** KV em memória que conta escrita por chave. */
 function fakeKV(initial = {}) {
@@ -145,6 +147,57 @@ describe('custo da varredura em escrita de KV', () => {
   });
 });
 
+// #55: um serviço que alterna up/degraded (resposta lenta perto do limite)
+// gravava last_status + history no KV a CADA varredura: 290 escritas em 24 h
+// no ritmo do agendador, ~720 no piso de 4 min, de uma cota de 1000/dia que a
+// conta divide com o fotos. Com o retrato em D1, os dois moram lá.
+describe('serviço oscilando (#55)', () => {
+  const lenta = (st) => [{ ...SWEEP[0], status: st, rt: st === 'up' ? 250 : 2500 }, SWEEP[1]];
+
+  test('com o D1: 144 varreduras alternando custam zero escrita de KV, e nada se perde', async () => {
+    quotaNaoConfigurada();
+    const kv = fakeKV({ last_status: JSON.stringify({ Fotos: 'up', Treino: 'up' }) });
+    const DB = d1Sqlite();
+    setClock('2026-09-24T00:00:10Z');
+    for (let i = 0; i < 144; i++) {
+      await status.detectAndNotify({ STATUS_KV: kv }, lenta(i % 2 ? 'up' : 'degraded'), 'https://status.lucafchala.com', { latenciaNoD1: true, DB });
+      advance(10 * 60_000);
+    }
+    assert.equal([...kv.writes.values()].reduce((a, b) => a + b, 0), 0, `escritas de KV: ${JSON.stringify([...kv.writes])}`);
+    // O estado e o log estão no D1: a última varredura foi 'up', e o log
+    // guarda as transições mais recentes até o teto dele.
+    const atual = JSON.parse(DB.sqlite.prepare("SELECT valor FROM estado WHERE chave = 'last_status'").get().valor);
+    assert.equal(atual.Fotos, 'up');
+    const log = await historico.readHistory(kv, DB);
+    assert.equal(log.filter((e) => e.name === 'Fotos').length, historico.HISTORY_MAX);
+    // E o /api/painel lê o mesmo log.
+    const resumo = await historico.resumoHistorico(kv, DB);
+    assert.ok(resumo.flapping.some((f) => f.name === 'Fotos'), 'oscilação aparece no painel');
+  });
+
+  test('primeira varredura depois do deploy: o estado antigo do KV vale (sem alerta perdido nem log apagado)', async () => {
+    quotaNaoConfigurada();
+    const antigo = [{ name: 'Treino', from: 'up', to: 'down', at: '2026-09-23T23:00:00Z', severity: 'critico', problems: [] }];
+    const kv = fakeKV({ last_status: JSON.stringify({ Fotos: 'up', Treino: 'down' }), history: JSON.stringify(antigo) });
+    const DB = d1Sqlite();
+    setClock('2026-09-24T00:00:10Z');
+    // Treino segue fora (sem transição) e Fotos cai (transição a partir do 'up' do KV).
+    await status.detectAndNotify({ STATUS_KV: kv }, [{ ...SWEEP[0], status: 'down' }, { ...SWEEP[1], status: 'down' }], 'https://status.lucafchala.com', { latenciaNoD1: true, DB });
+    const log = await historico.readHistory(kv, DB);
+    assert.deepEqual(log.map((e) => `${e.name}:${e.from}>${e.to}`), ['Fotos:up>down', 'Treino:up>down']);
+    assert.equal(kv.writesOf('last_status') + kv.writesOf('history'), 0);
+  });
+
+  test('sem o D1: o comportamento de antes (KV), para instalação sem STATUS_DB', async () => {
+    quotaNaoConfigurada();
+    const kv = fakeKV({ last_status: JSON.stringify({ Fotos: 'up', Treino: 'up' }) });
+    setClock('2026-09-24T00:00:10Z');
+    await status.detectAndNotify({ STATUS_KV: kv }, lenta('degraded'), 'https://status.lucafchala.com');
+    assert.equal(kv.writesOf('last_status'), 1);
+    assert.equal(kv.writesOf('history'), 1);
+  });
+});
+
 describe('certificado que o token não consegue ler', () => {
   /** Simula a API da Cloudflare: GraphQL vazio, uma zona, e o endpoint de
    *  certificados recusando por falta de escopo — o estado real de produção. */
@@ -196,5 +249,60 @@ describe('certificado que o token não consegue ler', () => {
     const last = JSON.parse(kv._store.get('last_status'));
     assert.equal('TLS · lucafchala.com' in last, false);
     assert.equal(kv.writesOf('last_status'), 0);
+  });
+});
+
+// #63: as rotas do fotos v3. Um noindex numa galeria pública, ou o Disallow dos
+// downloads sumindo do robots, não derrubam nada — só tiram as fotos da busca
+// (ou deixam o robô baixar cada original). Falha calada: tem teste.
+describe('fotos v3: galerias indexáveis e robots', () => {
+  const B = 'https://fotos.lucafchala.com';
+  const salvo = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = salvo; });
+  const xml = (corpo) => new Response(`<?xml version="1.0"?>${corpo}`, { headers: { 'content-type': 'application/xml' } });
+  function site({ meta = 'index,follow', xrobots = null, indice = null } = {}) {
+    globalThis.fetch = async (input) => {
+      const u = new URL(String(input?.url || input));
+      if (u.pathname === '/sitemap-galerias.xml') return indice ? indice() : xml(`<sitemapindex><sitemap><loc>${B}/sitemap-galeria-a.xml</loc></sitemap></sitemapindex>`);
+      if (u.pathname === '/sitemap-galeria-a.xml') return xml(`<urlset><url><loc>${B}/galeria/a</loc></url></urlset>`);
+      if (u.pathname === '/galeria/a') {
+        const h = { 'content-type': 'text/html' };
+        if (xrobots) h['x-robots-tag'] = xrobots;
+        return new Response(`<html><head><meta name="robots" content="${meta}"></head><body>${'x'.repeat(80)}</body></html>`, { headers: h });
+      }
+      return new Response('nada', { status: 404 });
+    };
+  }
+  const L = 'galerias: sitemap e indexação';
+
+  test('galeria sem noindex: verde', async () => {
+    site();
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'up');
+  });
+  test('meta robots noindex na galeria: degradado', async () => {
+    site({ meta: 'noindex,follow' });
+    const r = await status.checkGaleriaIndexavel(L, B);
+    assert.equal(r.status, 'degraded');
+    assert.match(r.detail, /noindex/);
+  });
+  test('X-Robots-Tag noindex na galeria: degradado', async () => {
+    site({ xrobots: 'noindex' });
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'degraded');
+  });
+  test('o índice não é sitemapindex: degradado', async () => {
+    site({ indice: () => xml('<urlset></urlset>') });
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'degraded');
+  });
+  test('índice apontando para fora do site: não segue', async () => {
+    let foiFora = false;
+    site({ indice: () => xml('<sitemapindex><sitemap><loc>https://mal.example/x.xml</loc></sitemap></sitemapindex>') });
+    const f = globalThis.fetch;
+    globalThis.fetch = async (i, o) => { if (String(i?.url || i).includes('mal.example')) foiFora = true; return f(i, o); };
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'degraded');
+    assert.equal(foiFora, false);
+  });
+  test('índice vazio: desconhecido, não verde nem vermelho', async () => {
+    site({ indice: () => xml('<sitemapindex></sitemapindex>') });
+    assert.equal((await status.checkGaleriaIndexavel(L, B)).status, 'unknown');
   });
 });

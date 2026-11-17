@@ -98,7 +98,7 @@ export async function montarPainel(context) {
   const [terceiros, cotas, historico] = await Promise.all([
     secao('terceiros', () => verificarTerceiros(context)),
     secao('cotas', () => lerCotas(context)),
-    secao('historico', () => resumoHistorico(KV)),
+    secao('historico', () => resumoHistorico(KV, DB)),
   ]);
 
   let serie = null;

@@ -16,20 +16,21 @@ The ecosystem's status page: a static page plus Cloudflare Pages Functions that 
 | `functions/api/third-party-status.js`, `quota-stats.js`, `status-history.js`, `latency-trends.js`, `healthz.js` | The other sections |
 | `agendador/` | Cron Worker that requests a sweep every 10 min |
 | `scripts/vigia.mjs` + `.github/workflows/monitor.yml` | Watchdog outside Cloudflare |
-| `tests/*.test.mjs` | `node --test tests/*.test.mjs` — no package.json, no deps. `regua.test.mjs` pins the three rulers that fail silently: the day bar's colour, fotos' `/dashboard` behind Cloudflare Access, and Cloudflare‑Brazil (GRU rules) |
+| `tests/*.test.mjs` | `node --test tests/*.test.mjs` — no package.json, no deps. `monitor.test.mjs` also pins fotos v3: galleries without `noindex` (`checkGaleriaIndexavel`). `regua.test.mjs` pins the three rulers that fail silently: the day bar's colour, fotos' `/dashboard` behind Cloudflare Access, and Cloudflare‑Brazil (GRU rules) |
 
 ## Rules
 
 - **Markers are contracts.** Each entry in `SERVICES` has a `marker` that must appear on that site (`Luca`, `Painel`, `Paste`, `url.lucafchala.com`, `Chaves`, `subs`, `Luca Ferriani Chala` in proof's `.txt`, `Entre Nós` on entrenos2026.com — fotos' "em breve" page before the album's launch, the album after it, …). A service can instead set `acesso: true` (fotos' `/dashboard`, "Fotos — Dashboard"): it has **no marker** — it's checked by the Cloudflare Access 302 (`probeAcesso` → `avaliarAcesso` in `status.js`), and the old `/dashboard/login` marker is no longer the contract. Don't add a marker behind an Access gate — no probe sees that body. The other repos' CLAUDE.md files tell their authors not to remove them; don't change them here without changing the site. This page's own marker is `monitoramento de serviços`, kept in the static footer outside `data-i18n` (CI checks it).
 - **CSP is strict:** `script-src 'self'; style-src 'self'; font-src 'self'`, no third-party origin (`tests/pagina.test.mjs`). No inline `<script>`, no `on*=`, no `style=` (including in HTML built by `app.js` — set widths with CSSOM). Events go through `data-action` + one delegated listener. Every `<script>` has `data-cfasync="false"`.
-- **KV writes are the scarce resource** (1k/day, shared account-wide with fotos). Steady state must cost zero writes: `last_status` only on a real change, `alert_pending` only on a failed send, latency at most every ~30 min. `tests/monitor.test.mjs` counts writes.
+- **KV writes are the scarce resource** (1k/day, shared account-wide with fotos). Steady state must cost zero writes: `last_status` only on a real change, `alert_pending` only on a failed send, latency at most every ~30 min. With `STATUS_DB`, `last_status` and `history` live in D1's `estado` table (`lerEstado`/`gravarEstado` in `retrato.js`; a key D1 lacks is still read from KV, never written there), so a flapping service costs zero KV writes (#55). `tests/monitor.test.mjs` counts writes.
 - **Alerts:**
   - cooldown key `notify_sent:{name}:{to}`;
-  - the cooldown is written only after Resend accepts the batch;
-  - batches of ≤ 100;
+  - the cooldown is written only after Resend accepts at least one batch;
+  - batches of ≤ 100, spaced ~600 ms apart; a refused batch is retried for **its recipients only** (`dest` in `alert_pending`), never the whole list — `tests/alertas.test.mjs` (#56);
   - `cota ·` / `TLS ·` rows go only to `NOTIFY_TO`;
   - never let a client request shape an email.
 - **Public endpoints don't leak internals.** No binding names or subscriber counts in `/api/status`, `/api/healthz` (detail only with `X-Status-Token` = `STATUS_ADMIN_TOKEN`) or `/api/subscribe` errors. Raw upstream errors go to `console.error`.
+- **D1 storage is a size, not a flow.** `usage.d1Storage` (quota `d1Storage`, 5 GB) comes from `d1StorageAdaptiveGroups` (`max { databaseSizeBytes }`, dimensions `databaseId`, `date`), separate from the rows query: per database, the size on the most recent date of a 3‑day window, summed across databases (`somaTamanhoD1` in `quota-stats.js`). Never sum the series, and no data (empty or GraphQL error, listed in `errors[]` as `D1 storage`) stays `unknown`, never 0. It sat unfilled for months and showed "sem dados" without anyone noticing; `tests/d1-armazenamento.test.mjs` pins it.
 - **Homelab is read, not probed.** Its state comes from the `homelab-watchdog` Worker (`HOMELAB_STATUS_URL`, `lerVigiaHomelab`). Never probe the tunnel from here, and never show any homelab address (the row has `url: ''`). Watchdog unreachable → `unknown`, never `down`.
 - **Unknown is not up.** Anything unread (a third-party page that 403s, a quota dataset that failed, a cert the token can't see) is `unknown`, not green and not red.
 - **Cloudflare (Brazil): São Paulo (GRU) rules.** `estadoBrasil` in `third-party-status.js` returns GRU's state (unknown GRU status stays `unknown`), not the worst of the ~30 Brazil PoPs; the others weigh only when the problem is broad — ≥ 1/3 of them non‑operational → at least degraded, ≥ 1/2 in `major_outage` → down. The description still lists every affected PoP. `tests/regua.test.mjs` pins it.

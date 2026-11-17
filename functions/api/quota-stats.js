@@ -99,6 +99,18 @@ const Q_D1 = `query($accountTag:String!,$sinceDate:Date!,$untilDate:Date!){viewe
   d1AnalyticsAdaptiveGroups(limit:100,filter:{date_geq:$sinceDate,date_leq:$untilDate}){sum{rowsRead rowsWritten}dimensions{databaseId}}
 }}}`;
 
+// Armazenamento do D1: a cota (5 GB) é o TOTAL da conta, e `d1AnalyticsAdaptiveGroups`
+// (linhas lidas/escritas) não traz tamanho — ele mora em `d1StorageAdaptiveGroups`,
+// campo `max { databaseSizeBytes }` (developers.cloudflare.com/d1/observability/metrics-analytics/).
+// Sem esta consulta a linha "D1 · armazenamento" ficava sempre em "sem dados".
+// A janela é de alguns dias, não só hoje: a amostra do dia pode ainda não ter
+// chegado logo depois da meia-noite UTC, e `ultimoPorBanco` fica com a data mais
+// recente de cada banco.
+const D1_STORAGE_DIAS = 3;
+const Q_D1_STORAGE = `query($accountTag:String!,$sinceDate:Date!,$untilDate:Date!){viewer{accounts(filter:{accountTag:$accountTag}){
+  d1StorageAdaptiveGroups(limit:1000,filter:{date_geq:$sinceDate,date_leq:$untilDate}){max{databaseSizeBytes}dimensions{databaseId date}}
+}}}`;
+
 // O Worker do fotos hora a hora nas últimas 24 h: requisições, invocações
 // com erro (exceção, CPU estourada) e CPU p99. É o "extremamente detalhado"
 // que não custa sonda nenhuma — a Cloudflare já mede tudo isso de cada
@@ -144,6 +156,27 @@ function sumOf(rows, field) {
   return rows.reduce((acc, r) => acc + (r?.sum?.[field] || 0), 0);
 }
 
+// Tamanho de banco é um valor num instante, não um fluxo: somar a série de dias
+// contaria o mesmo banco várias vezes. Pega, por banco, o tamanho da data mais
+// recente da janela e soma entre bancos. Sem linha nenhuma devolve null
+// (desconhecido) — nunca 0, que pareceria "D1 vazio, tudo certo".
+function somaTamanhoD1(rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const recente = new Map();
+  for (const r of rows) {
+    const id = r?.dimensions?.databaseId;
+    const bytes = r?.max?.databaseSizeBytes;
+    if (!id || typeof bytes !== 'number' || !Number.isFinite(bytes)) continue;
+    const data = String(r?.dimensions?.date || '');
+    const atual = recente.get(id);
+    if (!atual || data > atual.data) recente.set(id, { data, bytes });
+  }
+  if (!recente.size) return null;
+  let total = 0;
+  for (const { bytes } of recente.values()) total += bytes;
+  return total;
+}
+
 async function collectUsage(token, accountTag) {
   const w = utcDayWindow();
   const usage = {};
@@ -153,11 +186,13 @@ async function collectUsage(token, accountTag) {
 
   const agora = new Date();
   const ontem = new Date(agora.getTime() - 24 * 3600_000);
-  const [kvOps, kvStore, workers, d1, hora, dobj, pages] = await Promise.all([
+  const desde = new Date(agora.getTime() - D1_STORAGE_DIAS * 86400_000).toISOString().slice(0, 10);
+  const [kvOps, kvStore, workers, d1, d1Store, hora, dobj, pages] = await Promise.all([
     gql(token, accountTag, Q_KV_OPS, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('KV ops', e)); return null; }),
     gql(token, accountTag, Q_KV_STORAGE, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(motivo('KV storage', e)); return null; }),
     gql(token, accountTag, Q_WORKERS, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('Workers', e)); return null; }),
     gql(token, accountTag, Q_D1, { sinceDate: w.sinceDate, untilDate: w.untilDate }).catch(e => { errors.push(motivo('D1', e)); return null; }),
+    gql(token, accountTag, Q_D1_STORAGE, { sinceDate: desde, untilDate: w.untilDate }).catch(e => { errors.push(motivo('D1 storage', e)); return null; }),
     gql(token, accountTag, Q_WORKER_HORA, { since: ontem.toISOString(), until: agora.toISOString(), script: WORKER_DETALHADO })
       .catch(e => { errors.push(motivo(`${WORKER_DETALHADO} por hora`, e)); return null; }),
     gql(token, accountTag, Q_DO, { since: w.since, until: w.until }).catch(e => { errors.push(motivo('Durable Objects', e)); return null; }),
@@ -241,6 +276,10 @@ async function collectUsage(token, accountTag) {
     const rows = d1.d1AnalyticsAdaptiveGroups || [];
     usage.d1RowsRead    = sumOf(rows, 'rowsRead');
     usage.d1RowsWritten = sumOf(rows, 'rowsWritten');
+  }
+  if (d1Store) {
+    // null (sem linhas) fica `unknown` em buildQuotas; não vira 0.
+    usage.d1Storage = somaTamanhoD1(d1Store.d1StorageAdaptiveGroups);
   }
 
   return { usage, errors };

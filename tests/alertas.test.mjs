@@ -88,6 +88,46 @@ describe('envio', () => {
     assert.equal(m.lotes[0][0].to[0], 'dono@x.co');
   });
 
+  test('lote recusado: só os destinatários dele são tentados de novo, ninguém recebe duas vezes (#56)', async () => {
+    const subs = Array.from({ length: 150 }, (_, i) => ({ email: `s${i}@x.co`, token: `${String(i).padStart(8, '0')}-2222-3333-4444-555555555555` }));
+    const kv = fakeKV({ last_status: JSON.stringify({ Lote: 'up' }), subscribers: JSON.stringify(subs) });
+    let chamadas = 0;
+    // O 2º lote da primeira rodada é recusado (limite por segundo); depois tudo passa.
+    const m = mundo({ resend: () => (++chamadas === 2 ? new Response('rate', { status: 429 }) : new Response('{}')) });
+    await status.detectAndNotify(ENV(kv), [svc('Lote', 'down')], ORIGIN);
+    assert.deepEqual(m.lotes.map((l) => l.length), [100, 51]);
+    const fila = JSON.parse(kv._store.get('alert_pending'));
+    assert.equal(fila.length, 1);
+    assert.deepEqual(fila[0].dest.sort(), subs.slice(99).map((s) => s.email).sort(), 'na fila, só quem estava no lote recusado');
+    assert.ok(kv._store.has('notify_sent:Lote:down'), 'o envio saiu em parte: cooldown gasto');
+
+    clock += 10 * 60_000;
+    await status.detectAndNotify(ENV(kv), [svc('Lote', 'down')], ORIGIN);
+    assert.equal(m.lotes.length, 3);
+    assert.equal(m.lotes[2].length, 51, 'a sobra sai mesmo com o cooldown gasto');
+    const vezes = new Map();
+    for (const d of m.destinatarios()) vezes.set(d, (vezes.get(d) || 0) + 1);
+    // O lote recusado também está em m.lotes; tira-o da conta.
+    for (const msg of m.lotes[1]) vezes.set(msg.to[0], vezes.get(msg.to[0]) - 1);
+    assert.equal(vezes.size, 151);
+    assert.ok([...vezes.values()].every((n) => n === 1), 'cada destinatário recebeu uma vez só');
+    assert.equal(kv._store.has('alert_pending'), false, 'fila limpa depois do reenvio');
+
+    clock += 10 * 60_000;
+    await status.detectAndNotify(ENV(kv), [svc('Lote', 'down')], ORIGIN);
+    assert.equal(m.lotes.length, 3, 'nada mudou: nada sai');
+  });
+
+  test('entre lotes há uma pausa (limite por segundo do Resend)', async () => {
+    const subs = Array.from({ length: 120 }, (_, i) => ({ email: `p${i}@x.co`, token: `${String(i).padStart(8, '0')}-2222-3333-4444-555555555555` }));
+    const kv = fakeKV({ last_status: JSON.stringify({ Pausa: 'up' }), subscribers: JSON.stringify(subs) });
+    const horas = [];
+    mundo({ resend: () => { horas.push(realNow()); return new Response('{}'); } });
+    await status.detectAndNotify(ENV(kv), [svc('Pausa', 'down')], ORIGIN);
+    assert.equal(horas.length, 2);
+    assert.ok(horas[1] - horas[0] >= 500, `pausa de ${horas[1] - horas[0]} ms`);
+  });
+
   test('item da fila que deixou de ser verdade é limpo, não ressuscita na queda seguinte (ST-3)', async () => {
     // Serviço que nenhum outro teste usa: o cooldown de reserva vive no módulo.
     const kv = fakeKV({ last_status: JSON.stringify({ Treino: 'up' }) });
